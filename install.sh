@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; DIM='\033[2m'; NC='\033[0m'
+CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
 
 INSTALL_DIR="${CYGNUS_INSTALL_DIR:-$HOME/.local/bin}"
 CDN_URL="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
@@ -25,6 +25,34 @@ CLI_VERSION="${CYGNUS_VERSION:-0.1.0}"
 info()  { echo -e "${CYAN}cygnus${NC} $*"; }
 ok()    { echo -e "${GREEN}  ✓${NC} $*"; }
 fail()  { echo -e "${RED}  ✗${NC} $*"; exit 1; }
+
+# ── Pre-execution disclosure ────────────────────────────────────────
+# Shown FIRST when piped to sh — gives security-aware users a chance
+# to abort + re-fetch the script for review before anything happens.
+# Skip with CYGNUS_NO_PREAMBLE=1 (useful for CI/automation).
+if [ "${CYGNUS_NO_PREAMBLE:-}" != "1" ]; then
+    echo ""
+    echo -e "${BOLD}Cygnus CLI v${CLI_VERSION} — installer${NC}"
+    echo "─────────────────────────────────────────────────"
+    echo -e "${BOLD}Will:${NC}"
+    echo "  • Download ~8 MB binary from cygnus-registry.sfo3.cdn.digitaloceanspaces.com"
+    echo "  • Verify SHA-256 against the published checksum (same CDN, separate file)"
+    echo "  • Install to ${INSTALL_DIR}/cygnus  (no sudo, no system changes)"
+    echo ""
+    echo -e "${BOLD}Won't:${NC}"
+    echo "  • Modify ~/.bashrc / ~/.zshrc  (prints PATH hint, never writes)"
+    echo "  • Send telemetry or analytics"
+    echo "  • Run on startup / install daemons"
+    echo "  • Touch pip / npm / brew / cargo  (works alongside, never replaces)"
+    echo ""
+    echo -e "${BOLD}Reverse:${NC}  rm ${INSTALL_DIR}/cygnus"
+    echo -e "${BOLD}Source:${NC}   https://github.com/blackswan-software/cygnus-cli/blob/main/install.sh"
+    echo -e "${BOLD}Issues:${NC}   https://github.com/blackswan-software/cygnus-cli/issues"
+    echo "─────────────────────────────────────────────────"
+    echo "Continuing in 3 seconds. Press Ctrl-C to abort + review."
+    echo ""
+    sleep 3 2>/dev/null || true
+fi
 
 # ── 1. Detect OS + Arch ─────────────────────────────────────────────
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
