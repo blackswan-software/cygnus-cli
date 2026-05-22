@@ -65,6 +65,30 @@ REGISTRY_URL = (
 TOKEN_EXTRACTOR_URL = os.environ.get("CYGNUS_TOKEN_EXTRACTOR", REGISTRY_URL)
 CONFIG_FILE = CYGNUS_HOME / "config.json"
 
+# Ecosystem allowlist. CLI flags that take --ecosystem must validate against
+# this set before constructing registry URLs. Prevents URL injection via the
+# ecosystem parameter (caught 2026-05-21 pen test M-2 — semicolon got through
+# to URL construction, was rejected by urllib but produced messy error).
+VALID_ECOSYSTEMS = frozenset({
+    "python", "node", "go", "rust", "java", "csharp", "ruby",
+    "php", "swift", "kotlin", "elixir", "zig", "cpp", "dart",
+})
+
+
+def _validate_ecosystem(eco: str | None) -> str | None:
+    """Return the ecosystem if valid, else raise SystemExit with a clear message.
+
+    None passes through (means 'auto-detect' to callers)."""
+    if eco is None or eco == "":
+        return None
+    eco_lower = eco.lower().strip()
+    if eco_lower not in VALID_ECOSYSTEMS:
+        raise SystemExit(
+            f"Cygnus: invalid ecosystem '{eco}'.\n"
+            f"  Valid options: {', '.join(sorted(VALID_ECOSYSTEMS))}"
+        )
+    return eco_lower
+
 
 def _load_config() -> dict:
     """Load ~/.cygnus/config.json. Returns empty dict if missing or corrupt."""
@@ -607,8 +631,14 @@ def cmd_init(args):
     print(f"  Home:     {CYGNUS_HOME}")
     print(f"  Registry: {REGISTRY_URL}")
 
-    # Create directory structure
+    # Create directory structure. chmod 0700 so other local users can't
+    # read the cache (which contains response data tied to the user's API
+    # key) or modify it (cache poisoning). Caught 2026-05-21 pen test M-1.
     CYGNUS_HOME.mkdir(parents=True, exist_ok=True)
+    try:
+        CYGNUS_HOME.chmod(0o700)
+    except (OSError, PermissionError):
+        pass  # filesystem may not support chmod (e.g., Windows w/o NTFS perms)
     if eco:
         (CYGNUS_HOME / eco).mkdir(exist_ok=True)
 
@@ -2815,6 +2845,10 @@ def main():
             if arg in ("--ecosystem", "-e") and i + 1 < len(sys.argv):
                 args.ecosystem = sys.argv[i + 1]
                 break
+
+    # Validate ecosystem against allowlist before any URL construction.
+    # Prevents URL injection / messy error paths when user passes garbage.
+    args.ecosystem = _validate_ecosystem(args.ecosystem)
 
     # Apply --no-cache globally
     if getattr(args, "no_cache", False):
