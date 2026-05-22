@@ -52,7 +52,12 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           cd dist
-          sha256sum cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+          # sha256sum exists on Linux; macOS only ships shasum. Use whichever is available.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+          else
+            shasum -a 256 cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+          fi
 
       - name: Generate checksum (Windows)
         if: matrix.os == 'windows-latest'
