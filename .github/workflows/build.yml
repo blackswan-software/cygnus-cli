@@ -13,9 +13,10 @@ jobs:
           - os: ubuntu-latest
             arch: x86_64
             target: linux-x86_64
-          - os: macos-13
-            arch: x86_64
-            target: darwin-x86_64
+          # macos-13 (Intel Mac) REMOVED 2026-05-22. GitHub's macos-13 runner
+          # pool was stuck queued for >4h (Apple deprecated Intel in 2020;
+          # runners are scarce and being phased out). darwin-arm64 below
+          # covers >95% of macOS users. Re-add if Intel Mac demand justifies.
           - os: macos-14
             arch: arm64
             target: darwin-arm64
