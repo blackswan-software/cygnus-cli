@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec
+*.egg-info/
+.eggs/
+.env
+.cygnus/

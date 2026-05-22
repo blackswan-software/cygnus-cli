@@ -1,0 +1,87 @@
+name: Build CLI Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            target: linux-x86_64
+          - os: macos-13
+            arch: x86_64
+            target: darwin-x86_64
+          - os: macos-14
+            arch: arm64
+            target: darwin-arm64
+          - os: windows-latest
+            arch: x86_64
+            target: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build binary
+        shell: bash
+        run: |
+          python -m PyInstaller \
+            --onefile \
+            --name "cygnus-${{ matrix.target }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}" \
+            --strip \
+            --noupx \
+            --clean \
+            --noconfirm \
+            --log-level WARN \
+            cygnus/__main__.py
+
+      - name: Generate checksum (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd dist
+          sha256sum cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+
+      - name: Generate checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd dist
+          $hash = (Get-FileHash "cygnus-${{ matrix.target }}.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  cygnus-${{ matrix.target }}.exe" | Out-File -Encoding ascii "cygnus-${{ matrix.target }}.exe.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cygnus-${{ matrix.target }}
+          path: dist/cygnus-${{ matrix.target }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
