@@ -90,3 +90,33 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+      - name: Upload binaries to DO Spaces CDN
+        # install.sh on install.blackswan-software.ai fetches from
+        # cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<version>/<binary>
+        # so GH Release alone isn't sufficient — also push to Spaces.
+        # Requires DO_SPACES_KEY / DO_SPACES_SECRET as repo secrets.
+        # Will skip if secrets aren't set (so non-secret-holders can still build).
+        env:
+          DO_SPACES_KEY: ${{ secrets.DO_SPACES_KEY }}
+          DO_SPACES_SECRET: ${{ secrets.DO_SPACES_SECRET }}
+        run: |
+          if [ -z "$DO_SPACES_KEY" ] || [ -z "$DO_SPACES_SECRET" ]; then
+            echo "DO_SPACES_KEY/SECRET not set — skipping Spaces upload."
+            echo "install.sh will continue to serve the prior version's binaries"
+            echo "from cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<old-version>/."
+            exit 0
+          fi
+          pip install --quiet 'awscli<2'
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials <<-EOF
+          [default]
+          aws_access_key_id = $DO_SPACES_KEY
+          aws_secret_access_key = $DO_SPACES_SECRET
+          EOF
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Uploading dist/* to s3://cygnus-registry/cli/${VERSION}/"
+          aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
+            dist/ "s3://cygnus-registry/cli/${VERSION}/" \
+            --acl public-read \
+            --no-progress
