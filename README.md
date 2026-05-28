@@ -42,9 +42,12 @@ Same binaries the script downloads. Verify SHA-256 before running.
 
 | Platform | Binary | Checksum |
 |---|---|---|
-| Linux x86_64 | [cygnus-linux-x86_64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-linux-x86_64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-linux-x86_64.sha256) |
-| macOS Apple Silicon | [cygnus-darwin-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-darwin-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-darwin-arm64.sha256) |
-| Windows x86_64 | [cygnus-windows-x86_64.exe](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-windows-x86_64.exe) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/0.1.0/cygnus-windows-x86_64.exe.sha256) |
+| Linux x86_64 | [cygnus-linux-x86_64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-x86_64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-x86_64.sha256) |
+| Linux arm64 | [cygnus-linux-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-arm64.sha256) |
+| macOS Apple Silicon | [cygnus-darwin-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64.sha256) |
+| Windows x86_64 | [cygnus-windows-x86_64.exe](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe.sha256) |
+
+Pin a specific version by swapping `latest` for `0.1.1`, `0.1.2`, etc. in the URL.
 
 Then:
 

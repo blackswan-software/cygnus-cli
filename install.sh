@@ -20,7 +20,11 @@ CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; DIM='\033[2m'; BOLD='\0
 
 INSTALL_DIR="${CYGNUS_INSTALL_DIR:-$HOME/.local/bin}"
 CDN_URL="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
-CLI_VERSION="${CYGNUS_VERSION:-0.1.0}"
+# Default to "latest" so users always get the newest release without us
+# shipping install.sh edits on every version bump. Pin via
+# CYGNUS_VERSION=0.1.0 if you need a specific version. Each release uploads
+# binaries to BOTH cli/<version>/ and cli/latest/ (see build.yml release job).
+CLI_VERSION="${CYGNUS_VERSION:-latest}"
 
 info()  { echo -e "${CYAN}cygnus${NC} $*"; }
 ok()    { echo -e "${GREEN}  ✓${NC} $*"; }

@@ -6,7 +6,10 @@
 $ErrorActionPreference = "Stop"
 
 $CDN = "https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
-$Version = if ($env:CYGNUS_VERSION) { $env:CYGNUS_VERSION } else { "0.1.0" }
+# Default to "latest" so install.ps1 doesn't need a release-bump edit
+# every version. Pin via $env:CYGNUS_VERSION. CI uploads to both
+# cli/<version>/ and cli/latest/.
+$Version = if ($env:CYGNUS_VERSION) { $env:CYGNUS_VERSION } else { "latest" }
 $InstallDir = if ($env:CYGNUS_INSTALL_DIR) { $env:CYGNUS_INSTALL_DIR } else { "$env:LOCALAPPDATA\cygnus" }
 
 $Arch = if ([System.Environment]::Is64BitOperatingSystem) { "x86_64" } else { "x86" }

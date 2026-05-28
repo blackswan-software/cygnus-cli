@@ -10,9 +10,18 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # PIN ubuntu-22.04 (GLIBC 2.35) — NOT ubuntu-latest. GitHub's
+          # ubuntu-latest is 24.04 (GLIBC 2.39) and the resulting binary
+          # won't load on Ubuntu 22.04 LTS, Debian 12, or older — most
+          # production servers. v0.1.0 shipped with GLIBC 2.38 and was
+          # effectively unrunnable on common server distros. 22.04 LTS
+          # runs through April 2027.
+          - os: ubuntu-22.04
             arch: x86_64
             target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            target: linux-arm64
           # macos-13 (Intel Mac) REMOVED 2026-05-22. GitHub's macos-13 runner
           # pool was stuck queued for >4h (Apple deprecated Intel in 2020;
           # runners are scarce and being phased out). darwin-arm64 below
@@ -120,4 +129,13 @@ jobs:
           aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
             dist/ "s3://cygnus-registry/cli/${VERSION}/" \
             --acl public-read \
+            --no-progress
+          # Also push to cli/latest/ so install.sh + install.ps1 can default
+          # to "latest" and we don't have to ship a script edit on every
+          # release. The version-pinned path stays for users who want it.
+          echo "Mirroring to s3://cygnus-registry/cli/latest/"
+          aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
+            dist/ "s3://cygnus-registry/cli/latest/" \
+            --acl public-read \
+            --delete \
             --no-progress
