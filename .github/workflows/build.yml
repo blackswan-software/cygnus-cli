@@ -124,15 +124,25 @@ jobs:
           aws_access_key_id = $DO_SPACES_KEY
           aws_secret_access_key = $DO_SPACES_SECRET
           EOF
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "Uploading dist/* to s3://cygnus-registry/cli/${VERSION}/"
-          aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
-            dist/ "s3://cygnus-registry/cli/${VERSION}/" \
-            --acl public-read \
-            --no-progress
+          # GITHUB_REF=refs/tags/v0.1.1 → TAG=v0.1.1, VERSION=0.1.1.
+          # We upload to BOTH cli/v0.1.1/ and cli/0.1.1/ because users
+          # naturally paste the GH tag name (v0.1.1) but earlier releases
+          # only published the v-stripped path (0.1.1). Caught 2026-05-29
+          # when v0.1.1 binaries 403'd at cli/v0.1.1/ until manually
+          # mirrored server-side. Writing both prefixes is idempotent and
+          # cheap — same dist/, two ~10MB syncs.
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          for PREFIX in "${TAG}" "${VERSION}"; do
+            echo "Uploading dist/* to s3://cygnus-registry/cli/${PREFIX}/"
+            aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
+              dist/ "s3://cygnus-registry/cli/${PREFIX}/" \
+              --acl public-read \
+              --no-progress
+          done
           # Also push to cli/latest/ so install.sh + install.ps1 can default
           # to "latest" and we don't have to ship a script edit on every
-          # release. The version-pinned path stays for users who want it.
+          # release. The version-pinned paths stay for users who want them.
           echo "Mirroring to s3://cygnus-registry/cli/latest/"
           aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
             dist/ "s3://cygnus-registry/cli/latest/" \
