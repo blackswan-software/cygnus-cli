@@ -1,0 +1,77 @@
+name: 'Cygnus Verify'
+description: 'Verify your project dependencies via Cygnus. Fails the build if any dependency has a known security issue.'
+author: 'BlackSwan Software'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  ecosystem:
+    description: 'Ecosystem to verify (auto-detected from lockfile if omitted): python, node, ruby, go, rust, java, csharp, php, kotlin, scala, swift, dart, elixir, erlang, cpp'
+    required: false
+    default: ''
+  library:
+    description: 'Single library to verify instead of the project lockfile. Example: requests or requests==2.31.0'
+    required: false
+    default: ''
+  version:
+    description: 'Cygnus CLI version (e.g. v0.1.2, 0.1.2, or "latest")'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect runner platform
+      id: platform
+      shell: bash
+      run: |
+        OS="$(uname -s)"; ARCH="$(uname -m)"
+        case "${OS}-${ARCH}" in
+          Linux-x86_64)    TARGET=linux-x86_64 ;;
+          Linux-aarch64)   TARGET=linux-arm64 ;;
+          Linux-arm64)     TARGET=linux-arm64 ;;
+          Darwin-arm64)    TARGET=darwin-arm64 ;;
+          *) echo "::error::Unsupported runner platform: ${OS}-${ARCH}"; exit 1 ;;
+        esac
+        echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
+
+    - name: Download Cygnus CLI
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TARGET: ${{ steps.platform.outputs.target }}
+      run: |
+        set -euo pipefail
+        BIN="${RUNNER_TEMP}/cygnus"
+        BASE="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
+        URL="${BASE}/${VERSION}/cygnus-${TARGET}"
+        echo "Fetching ${URL}"
+        curl -fL --max-time 120 -o "${BIN}" "${URL}" \
+          || { echo "::error::Failed to download Cygnus CLI ${VERSION} for ${TARGET}"; exit 1; }
+        chmod +x "${BIN}"
+        # Verify checksum when published (warn-only if missing — older releases may lack)
+        if curl -fsSL --max-time 30 -o "${BIN}.sha256" "${URL}.sha256" 2>/dev/null; then
+          ( cd "$(dirname "${BIN}")" && sha256sum -c "$(basename "${BIN}").sha256" --status ) \
+            || { echo "::error::Cygnus CLI checksum mismatch — refusing to run"; exit 1; }
+          echo "  checksum verified"
+        else
+          echo "::warning::No checksum published for ${VERSION} — skipping verification"
+        fi
+        echo "CYGNUS_BIN=${BIN}" >> "$GITHUB_ENV"
+        "${BIN}" --help > /dev/null || { echo "::error::Cygnus CLI failed to invoke --help"; exit 1; }
+
+    - name: Verify project dependencies
+      shell: bash
+      env:
+        ECOSYSTEM: ${{ inputs.ecosystem }}
+        LIBRARY: ${{ inputs.library }}
+      run: |
+        set -euo pipefail
+        ARGS=(--ci)
+        [ -n "${ECOSYSTEM}" ] && ARGS=(--ecosystem "${ECOSYSTEM}" "${ARGS[@]}")
+        if [ -n "${LIBRARY}" ]; then
+          ARGS+=("${LIBRARY}")
+        fi
+        echo "Running: cygnus verify ${ARGS[*]}"
+        "${CYGNUS_BIN}" verify "${ARGS[@]}"
