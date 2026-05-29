@@ -8,6 +8,24 @@ Verified function signatures for every library in your stack. Pre-compiled, sign
 
 ---
 
+## Use in GitHub Actions
+
+Add four lines to your workflow to verify your dependencies on every CI run:
+
+```yaml
+- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2
+  with:
+    ecosystem: npm   # or python, ruby, go, java, csharp, rust, etc. (omit to auto-detect)
+```
+
+Fails the build on `SECURITY_ISSUE_DETECTED`. Pulls the CLI from the public CDN, verifies its SHA-256 against the published checksum, then runs `cygnus verify --ci` against your lockfile. No auth required for the free tier.
+
+Pin to `@latest` for rolling updates, or pin to a specific tag (`@v0.1.2`) for reproducible runs.
+
+Full action spec: [`.github/actions/verify/action.yml`](.github/actions/verify/action.yml).
+
+---
+
 ## Install
 
 Pick one. All three install the same binary; they differ in how much you trust the install path.
