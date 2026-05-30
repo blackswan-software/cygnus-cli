@@ -2492,6 +2492,211 @@ def cmd_account(args):
         print(f"  Or run:  cygnus account --json (to script via API)")
 
 
+def cmd_deposit(args):
+    """Open Stripe Checkout in the browser to deposit USD into your account balance.
+
+    Card entry happens on Stripe's hosted page (PCI-compliant) — the CLI never
+    sees the card data. After payment, Stripe redirects to a confirmation
+    page; this command polls /auth/billing/balance to surface the new total.
+
+    Usage:
+      cygnus deposit <USD>         # see pricing page
+      cygnus deposit 50 --no-open  # don't auto-open browser; print URL only
+    """
+    amount_usd = int(getattr(args, "amount", 0) or 0)
+    if amount_usd < 10:
+        print("  Error: minimum deposit is (see pricing page).", file=sys.stderr)
+        sys.exit(1)
+    amount_cents = amount_usd * 100
+
+    api_key = os.environ.get("CYGNUS_API_KEY", "") or _load_config().get("api_key", "")
+    if not api_key:
+        print("  Error: not authenticated. Run `cygnus auth signup` or `cygnus auth login`.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    return_url = "https://blackswan-software.ai/deposit/success"
+    body = {"amount_cents": amount_cents, "return_url": return_url}
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/billing/checkout",
+        data=payload, method="POST",
+        headers={"Content-Type": "application/json", "X-Api-Key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_b = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body_b).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    mode = data.get("mode", "live")
+    checkout_url = data.get("checkout_url", "")
+    if mode == "stub" or not checkout_url:
+        print(f"  Stripe is not enabled on the server (mode={mode}).")
+        print(f"  Deposit unavailable. Try the website: https://blackswan-software.ai/pricing")
+        sys.exit(1)
+
+    no_open = bool(getattr(args, "no_open", False))
+    print(f"  Opening Stripe Checkout for ${amount_usd:.2f}...")
+    print(f"  URL: {checkout_url}")
+
+    if not no_open:
+        opened = False
+        for opener in ("xdg-open", "open", "start"):  # linux, macOS, windows
+            try:
+                import subprocess  # local import; standard library
+                subprocess.Popen([opener, checkout_url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        if not opened:
+            print("  (Could not auto-open browser — paste the URL above manually.)")
+
+    print()
+    print("  Complete payment in the browser, then return here.")
+    print("  Polling /auth/billing/balance for the new balance (Ctrl-C to stop)...")
+    print()
+
+    # Poll for up to 5 minutes
+    import time
+    deadline = time.time() + 300
+    initial_balance = None
+    while time.time() < deadline:
+        req = urllib.request.Request(
+            f"{REGISTRY_URL}/auth/billing/balance",
+            headers={"X-Api-Key": api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                bal = json.loads(resp.read())
+            cents = int(bal.get("balance_cents", 0))
+            if initial_balance is None:
+                initial_balance = cents
+                print(f"  Initial balance: ${initial_balance / 100:.2f}")
+            elif cents > initial_balance:
+                print(f"\n  ✓ Deposit received. New balance: ${cents / 100:.2f}")
+                return
+            else:
+                print(f"    balance: ${cents / 100:.2f}  (waiting for webhook...)", end="\r", flush=True)
+        except Exception:
+            pass
+        time.sleep(5)
+    print()
+    print("  Polling timed out after 5 minutes. The webhook may still be in flight.")
+    print("  Check balance later with: cygnus account")
+
+
+def cmd_auth_forgot_key(args):
+    """Request a one-time email token to rotate the API key.
+
+    Usage:
+      cygnus auth forgot-key                       # prompts for email
+      cygnus auth forgot-key --email me@x.com
+    """
+    email = getattr(args, "email", None) or input("  Email: ").strip()
+    if not email or "@" not in email:
+        print("  Error: valid email required.", file=sys.stderr)
+        sys.exit(1)
+
+    payload = json.dumps({"email": email}).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/forgot-key",
+        data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            json.loads(resp.read())  # response is generic — don't reveal whether email is registered
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print("  ✓ If that email is registered, a reset token has been sent.")
+    print("  Check your inbox, then run:")
+    print("    cygnus auth reset-key <TOKEN>")
+
+
+def cmd_auth_reset_key(args):
+    """Consume a one-time email token, rotate the API key, store the new key locally.
+
+    Usage:
+      cygnus auth reset-key <TOKEN>
+    """
+    token = getattr(args, "token", None) or ""
+    token = token.strip()
+    if not token:
+        print("  Error: token required.", file=sys.stderr)
+        print("  Run `cygnus auth forgot-key` first to receive a token by email.", file=sys.stderr)
+        sys.exit(1)
+
+    # POST /auth/reset-key/{token} — server side rotates by key_hash + returns the new raw key
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/reset-key/{token}",
+        data=b"", method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        if e.code == 400:
+            print(f"  Error: {detail}", file=sys.stderr)
+            print("  Tokens expire — request a fresh one with `cygnus auth forgot-key`.", file=sys.stderr)
+        elif e.code == 404:
+            print(f"  Error: {detail}", file=sys.stderr)
+        else:
+            print(f"  Error: {e.code} {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    new_key = data.get("api_key", "") or data.get("new_key", "")
+    if not new_key:
+        print("  Error: server did not return a new key.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = _load_config()
+    cfg["api_key"] = new_key
+    # tier may have changed (unlikely but cheap to refresh — leave existing if not returned)
+    if data.get("tier"):
+        cfg["tier"] = data["tier"]
+    if data.get("email"):
+        cfg["email"] = data["email"]
+    _save_config(cfg)
+
+    fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
+    print(f"  ✓ New API key stored. Old key invalidated.")
+    print(f"    Fingerprint: ...{fingerprint}")
+    print(f"    Saved to {CONFIG_FILE}")
+
+
 def cmd_auth(args):
     subcmd = getattr(args, "auth_command", None)
     if subcmd == "signup":
@@ -2504,13 +2709,19 @@ def cmd_auth(args):
         cmd_auth_logout(args)
     elif subcmd == "cancel":
         cmd_auth_cancel(args)
+    elif subcmd == "forgot-key":
+        cmd_auth_forgot_key(args)
+    elif subcmd == "reset-key":
+        cmd_auth_reset_key(args)
     else:
-        print("Usage: cygnus auth <signup|login|status|logout|cancel>")
-        print("  signup  — create account (free or Verified-tier deposit pay-as-you-go)")
-        print("  login   — authenticate with existing API key")
-        print("  status  — show current auth state + balance")
-        print("  logout  — clear stored credentials")
-        print("  cancel  — cancel subscription (keep account)")
+        print("Usage: cygnus auth <signup|login|status|logout|cancel|forgot-key|reset-key>")
+        print("  signup       — create account (free or Verified-tier deposit pay-as-you-go)")
+        print("  login        — authenticate with existing API key")
+        print("  status       — show current auth state + balance")
+        print("  logout       — clear stored credentials")
+        print("  cancel       — cancel subscription (keep account)")
+        print("  forgot-key   — email yourself a one-time token to rotate the key")
+        print("  reset-key    — consume the token and store the new key locally")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -2814,6 +3025,10 @@ def main():
     auth_sub.add_parser("status", help="Show current auth state and key fingerprint")
     auth_sub.add_parser("logout", help="Clear stored credentials")
     auth_sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
+    p_forgot = auth_sub.add_parser("forgot-key", help="Email yourself a one-time token to rotate your API key")
+    p_forgot.add_argument("--email", help="Email address registered on your account (prompts if omitted)")
+    p_reset = auth_sub.add_parser("reset-key", help="Consume an emailed token, rotate the key, store it locally")
+    p_reset.add_argument("token", help="The one-time token from the reset email")
 
     sub.add_parser("uninstall", help="Uninstall Cygnus — cancel subscription + remove all data")
 
@@ -2826,6 +3041,13 @@ def main():
     p_account.add_argument("--stripe-test", action="store_true",
                            help="Test mode: shows balance from stub endpoints (no real charges)")
     p_account.add_argument("--json", action="store_true", help="JSON output")
+
+    p_deposit = sub.add_parser("deposit",
+                               help="Add funds to your account via Stripe Checkout (opens browser)")
+    p_deposit.add_argument("amount", type=int, metavar="USD",
+                           help="Amount in USD (see pricing page — e.g. 'cygnus deposit <USD>' = (see pricing page))")
+    p_deposit.add_argument("--no-open", action="store_true",
+                           help="Don't auto-open the browser; print the checkout URL only")
 
     p_issue = sub.add_parser(
         "issue",
@@ -2877,6 +3099,8 @@ def main():
         cmd_uninstall(args)
     elif args.command == "account":
         cmd_account(args)
+    elif args.command == "deposit":
+        cmd_deposit(args)
     elif args.command == "issue":
         cmd_issue(args)
     else:
