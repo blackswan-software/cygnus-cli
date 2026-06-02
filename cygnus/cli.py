@@ -1192,8 +1192,24 @@ def cmd_verify(args):
         if from_lock:
             deps = _parse_cygnus_lock()
             if not deps:
-                print("  No cygnus.lock found. Run 'cygnus lock' first.")
-                return
+                # Offer to generate the lock now instead of failing dead.
+                # --auto-lock (or CYGNUS_AUTO_LOCK=1) skips the prompt for CI.
+                auto = bool(getattr(args, "auto_lock", False)) or os.environ.get("CYGNUS_AUTO_LOCK") == "1"
+                if not auto:
+                    try:
+                        prompt = input("  No cygnus.lock found. Generate one now? [Y/n] ").strip().lower()
+                    except (KeyboardInterrupt, EOFError):
+                        print("\n  Cancelled.", file=sys.stderr)
+                        sys.exit(1)
+                    if prompt in ("n", "no"):
+                        print("  Skipped. Run `cygnus lock` to generate, then retry verify.")
+                        return
+                print("  Generating cygnus.lock first...\n")
+                cmd_lock(args)
+                deps = _parse_cygnus_lock()
+                if not deps:
+                    print("  cygnus lock did not produce a usable manifest. Run `cygnus lock` manually + retry.")
+                    sys.exit(1)
             _verify_project(ecosystem, deps, ci_mode)
         else:
             # Multi-ecosystem: if no explicit --ecosystem, detect all and verify each
@@ -2507,6 +2523,13 @@ def cmd_deposit(args):
     if amount_usd < 10:
         print("  Error: minimum deposit is (see pricing page).", file=sys.stderr)
         sys.exit(1)
+    # Backend MAX_DEPOSIT_CENTS = (see pricing page). Fail-fast client-side to avoid a
+    # wasted Stripe API roundtrip; point users above the cap toward Enterprise.
+    if amount_usd > 1000:
+        print(f"  Error: maximum single deposit is Verified-tier cap.", file=sys.stderr)
+        print(f"  Need more? Multiple deposits work, or contact support@blackswan-software.ai", file=sys.stderr)
+        print(f"  for Enterprise pricing (platform fee + per-use rates).", file=sys.stderr)
+        sys.exit(1)
     amount_cents = amount_usd * 100
 
     api_key = os.environ.get("CYGNUS_API_KEY", "") or _load_config().get("api_key", "")
@@ -3015,6 +3038,7 @@ def main():
     p_verify.add_argument("--check-signature", action="store_true", help="Verify Ed25519 signature against published keys")
     p_verify.add_argument("--cve", action="store_true", help="Show known CVEs/security advisories for this version")
     p_verify.add_argument("--from-lock", action="store_true", help="Verify from cygnus.lock (no native lockfile needed)")
+    p_verify.add_argument("--auto-lock", action="store_true", help="With --from-lock: auto-generate cygnus.lock if missing (no prompt). CI-friendly. CYGNUS_AUTO_LOCK=1 env var also works.")
 
     p_auth = sub.add_parser("auth", help="Manage authentication")
     auth_sub = p_auth.add_subparsers(dest="auth_command")

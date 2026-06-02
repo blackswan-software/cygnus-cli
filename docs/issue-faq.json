@@ -1,0 +1,47 @@
+{
+  "_schema_note": "Each entry: pattern is a Python regex run against (title + body). reply is markdown commented on the issue. close: true marks the issue closed. label: optional GitHub label to apply. First match wins (top-to-bottom). Edit + commit to refine.",
+  "patterns": [
+    {
+      "name": "no-lockfile",
+      "pattern": "(?i)(no cygnus\\.lock|lockfile not found|cygnus\\.lock.*not.*exist|missing.*cygnus.*lock)",
+      "label": "user-error/lockfile",
+      "close": true,
+      "reply": "Hi — looks like you don't have a `cygnus.lock` yet. **Run `cygnus lock` from your project root to generate one**, then retry `cygnus verify --from-lock`.\n\nAs of v0.1.3+, `cygnus verify --from-lock` will offer to generate the lockfile for you interactively (or pass `--auto-lock` for CI). If you're on an older CLI, update via `curl -fsSL https://install.blackswan-software.ai | sh`.\n\nClosing — reopen if this doesn't solve it."
+    },
+    {
+      "name": "command-not-found",
+      "pattern": "(?i)(command not found.*cygnus|cygnus.*command not found|cygnus: not found|cygnus: command not found)",
+      "label": "user-error/install",
+      "close": true,
+      "reply": "Sounds like the CLI isn't on your `PATH`. \n\nInstall (or reinstall) via:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThen confirm `~/.local/bin` is on `$PATH`:\n\n```bash\necho $PATH | tr ':' '\\n' | grep .local/bin\n```\n\nIf missing, add `export PATH=\"$HOME/.local/bin:$PATH\"` to your shell init (e.g. `~/.bashrc`).\n\nClosing — reopen if you still see this after a fresh install."
+    },
+    {
+      "name": "glibc-mismatch",
+      "pattern": "(?i)(GLIBC.*version|GLIBC_2\\.|version `GLIBC|libc.so.6.*GLIBC|cannot find.*GLIBC)",
+      "label": "user-error/old-binary",
+      "close": true,
+      "reply": "This was a bug in v0.1.0 — the binary was built on GLIBC 2.38 and wouldn't load on Ubuntu 22.04 / Debian 12 / older. **Fixed in v0.1.1+**.\n\nReinstall to pick up the current build:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThe install script defaults to `latest` which auto-tracks the newest release. Verify with `cygnus --version` afterward.\n\nClosing — reopen if you still see GLIBC errors after upgrading."
+    },
+    {
+      "name": "library-not-registered",
+      "pattern": "(?i)(not.*in.*registry|library.*not.*registered|not yet.*verified|404.*lookup)",
+      "label": "request/library",
+      "close": false,
+      "reply": "Looks like the library isn't yet in the verification registry. You can request it:\n\n```bash\ncygnus issue --library <name>\n```\n\nWe auto-compile + verify popular libraries within 24 hours, longer-tail within a few days. The issue you filed acts as a request — leaving open as a tracking ticket.\n\nIf you'd like priority, the Verified tier (Verified-tier deposit) gets your request bumped."
+    },
+    {
+      "name": "403-paid-tokens",
+      "pattern": "(?is)(?:tokens/verified[\\s\\S]*(?:403|forbidden|not authorized)|(?:403|forbidden|not authorized)[\\s\\S]*tokens/verified|paid.*tier.*required)",
+      "label": "user-error/tier",
+      "close": true,
+      "reply": "Verified tokens (the cryptographically-signed manifests) are paid-tier only. Free tier gets verified status + CVE info (`cygnus verify <lib>`) but not the underlying token JSON.\n\nTo enable, deposit see pricing page:\n\n```bash\ncygnus deposit <USD>\n```\n\nDocs: <https://blackswan-software.ai/pricing>\n\nClosing — reopen if you've deposited and still hit 403."
+    },
+    {
+      "name": "stripe-not-enabled",
+      "pattern": "(?i)(stripe.*not enabled|stub.*checkout|STRIPE_ENABLED.*false|deposit.*unavailable)",
+      "label": "infra/stripe-off",
+      "close": false,
+      "reply": "Stripe is not yet enabled on the production auth-service. Deposits return stub URLs in this mode. We'll enable in test mode after the launch arc completes (tracked in our internal SESSION.md).\n\nLeaving open as a tracker — will close once `STRIPE_ENABLED=true` is set on M1. Free-tier verify still works."
+    }
+  ]
+}
