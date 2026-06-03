@@ -2179,7 +2179,7 @@ def cmd_auth_signup(args):
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/signup",
         data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -2252,6 +2252,7 @@ def cmd_auth_login(args):
     # Validate against the auth service
     req = urllib.request.Request(f"{REGISTRY_URL}/auth/validate")
     req.add_header("X-Api-Key", key)
+    req.add_header("User-Agent", "cygnus-cli/1.0")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
@@ -2456,7 +2457,7 @@ def cmd_account(args):
         sys.exit(1)
 
     # --stripe-test sets env to override server flag (server still authoritative)
-    headers = {"X-API-Key": api_key}
+    headers = {"X-API-Key": api_key, "User-Agent": "cygnus-cli/1.0"}
     if args.stripe_test:
         headers["X-Stripe-Test-Mode"] = "1"
 
@@ -2544,7 +2545,11 @@ def cmd_deposit(args):
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/billing/checkout",
         data=payload, method="POST",
-        headers={"Content-Type": "application/json", "X-Api-Key": api_key},
+        headers={
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+            "User-Agent": "cygnus-cli/1.0",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
