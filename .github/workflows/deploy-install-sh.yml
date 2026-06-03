@@ -1,0 +1,61 @@
+name: Deploy install.sh to CDN
+
+# Auto-upload install.sh to Spaces whenever it changes on master.
+# Prevents the script-vs-binary drift bug (2026-06-03 incident):
+# binaries were deployed via build.yml on tag, but install.sh updates
+# required manual upload — letting the broken set-pipefail script ship
+# for ~6 days before anyone noticed `curl ... | sh` failed on Debian.
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'install.sh'
+      - '.github/workflows/deploy-install-sh.yml'
+  # Allow manual re-deploy via Actions tab
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Smoke-test install.sh on dash (Debian/Ubuntu default sh)
+        run: |
+          # Catch the bug class that motivated this workflow.
+          # If install.sh has bash-only syntax, dash will refuse to source it.
+          dash -n install.sh
+          # Also make sure it parses cleanly on sh + bash
+          sh -n install.sh
+          bash -n install.sh
+          echo "install.sh parses on dash, sh, bash"
+
+      - name: Configure AWS CLI for DO Spaces
+        run: |
+          aws configure set aws_access_key_id "${{ secrets.DO_SPACES_KEY }}"
+          aws configure set aws_secret_access_key "${{ secrets.DO_SPACES_SECRET }}"
+          aws configure set default.region sfo3
+
+      - name: Upload install.sh to Spaces
+        run: |
+          aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 cp \
+            install.sh \
+            s3://cygnus-registry/install/install.sh \
+            --acl public-read \
+            --content-type application/x-sh \
+            --cache-control "max-age=60, must-revalidate"
+
+      - name: Verify upload + content matches
+        run: |
+          # Direct origin fetch with cache-buster (bypasses CDN edge)
+          curl -fsSL "https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/install/install.sh?ts=$(date +%s)" -o /tmp/served.sh
+          if diff -q install.sh /tmp/served.sh; then
+            echo "install.sh on origin matches local copy"
+          else
+            echo "MISMATCH between local install.sh and what Spaces is serving"
+            exit 1
+          fi
