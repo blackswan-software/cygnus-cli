@@ -1,6 +1,7 @@
 {
   "_schema_note": "Each entry: pattern is a Python regex run against (title + body). reply is markdown commented on the issue. close: true marks the issue closed. label: optional GitHub label to apply. First match wins (top-to-bottom) — keep specific patterns above broad ones. Edit + commit to refine.",
   "_ip_check": "Replies are scrubbed of internal IP: no synthesis chain, no composition-vector counts, no cross-language mapping counts, no Phoenix/Mythos/DeepSeek/corpus references, no specific detection mechanisms beyond what's on the public website (sandbox + grade + sign). Re-run the scrub on every PR that touches this file.",
+  "_sync_note": "This file is mirrored to black-swan-software/src/data/faq.json — both are loaded by the GitHub regex bot and the website chat widget. Update both together.",
   "patterns": [
     {
       "name": "command-not-found",
@@ -38,18 +39,53 @@
       "reply": "Stripe is not yet enabled on the production auth-service. Deposits return stub URLs in this mode. We'll enable in test mode after the launch arc completes (tracked in our internal SESSION.md).\n\nLeaving open as a tracker — will close once `STRIPE_ENABLED=true` is set on M1. Free-tier verify still works."
     },
     {
+      "name": "ci-integration-help",
+      "pattern": "(?i)(github action|gitlab ci|circleci|jenkins|ci pipeline|how.*use.*ci|integrate.*ci|use in ci|use.*cygnus.*in.*github)",
+      "label": "question/ci",
+      "close": true,
+      "reply": "For GitHub Actions, we publish a composite Action:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    ecosystem: python  # or npm/go/maven/etc\n```\n\nThis handles sha256-verified CLI download (linux-x86_64, linux-arm64, darwin-arm64), then runs `cygnus verify --ci` against your lockfile. Full docs in the [README](https://github.com/blackswan-software/cygnus-cli#use-in-github-actions).\n\nFor GitLab CI / CircleCI / Jenkins / others, the recipe is:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\nexport PATH=\"$HOME/.local/bin:$PATH\"\ncygnus verify --ci --from-lock\n```\n\n`--ci` returns non-zero on any grade below your threshold (default `FULLY_VERIFIED`). Combine with `--auto-lock` if you don't commit `cygnus.lock`.\n\nClosing — reopen if you hit a specific CI provider that needs example config."
+    },
+    {
+      "name": "coexist-with-package-managers",
+      "pattern": "(?i)(replace npm|replace pip|replace cargo|replace.*package manager|still use npm|still use pip|do I.*need npm|alongside npm|alongside pip|with my existing|switch from npm|abandon npm|work with npm|integrate with npm)",
+      "label": "question/coexist",
+      "close": true,
+      "reply": "Short answer: **yes, npm / pip / cargo / gem / Maven / NuGet / composer all still work normally.** Cygnus is additive, not a replacement.\n\n**How it composes with your existing toolchain:**\n\n- **`cygnus verify`** reads your existing lockfile (`package-lock.json`, `requirements.txt`, `Cargo.lock`, etc.) and confirms each library is verified + signed. You keep using npm/pip/cargo to install — Cygnus just adds a verification gate.\n\n- **`cygnus install`** is an *optional* faster path. It downloads pre-compiled artifacts from our CDN instead of running `pip install` / `npm install` from scratch (Python 19x, Go 20x, Node 3x faster in CI). You can use it or skip it — it's not required.\n\n**Typical CI flow staying with npm:**\n```bash\nnpm ci                           # normal install\ncygnus verify --from-lock --ci   # gate the build on verification\n```\n\n**Typical CI flow using Cygnus install for speed:**\n```bash\ncygnus install                   # pre-compiled, signed, faster\ncygnus verify --from-lock --ci   # same gate\n```\n\nBoth produce the same dependency tree. Pick whichever fits your existing pipeline.\n\nClosing — reopen if your specific toolchain has a wrinkle (monorepos, private registries, etc.)."
+    },
+    {
+      "name": "install-cygnus",
+      "pattern": "(?i)(how.*install|install.*cygnus|installation|installer|set up cygnus|setup cygnus|get cygnus|how.*download.*cygnus|chocolatey|homebrew|brew install|scoop install|apt install cygnus|yum install cygnus|cygnus.*windows.*install|cygnus.*mac.*install)",
+      "label": "question/install",
+      "close": true,
+      "reply": "Install the CLI with one command:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThis fetches a small bash installer (~140 lines, readable) that:\n1. Detects your OS + arch (linux-x86_64, linux-arm64, darwin-arm64, windows-x86_64)\n2. Downloads the matching binary from `cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/`\n3. Verifies the SHA-256 against the published `.sha256` file\n4. Installs to `~/.local/bin/cygnus`\n\n**Security-aware install** (recommended for production / CI bootstrap):\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai > install.sh\nless install.sh   # read it first\nsh install.sh\n```\n\n**Manual / air-gapped**: download the binary + `.sha256` directly from the [CDN](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/) and verify yourself.\n\n**Package manager distributions** (Homebrew, Chocolatey, Scoop, apt/yum): on the roadmap, not shipped yet. Use the curl install script today — it produces the same binary that a Homebrew/Chocolatey package would.\n\nAfter install, verify:\n\n```bash\ncygnus --version\ncygnus auth signup    # email-only signup, free tier\n```\n\nIf `cygnus: command not found`, add `~/.local/bin` to your `$PATH`."
+    },
+    {
+      "name": "quick-start",
+      "pattern": "(?i)(how.*use cygnus|how do.*get started|quick start|getting started|first.*verification|basic usage|tutorial|how do I run cygnus)",
+      "label": "question/quickstart",
+      "close": true,
+      "reply": "Fastest path from install → first verification:\n\n```bash\n# Sign up (free tier, email only, no card)\ncygnus auth signup\n\n# From inside your project directory:\ncygnus lock        # one-time: scans your project, writes cygnus.lock\ncygnus verify --from-lock\n```\n\nYou'll see per-library output like:\n\n```\n✓ flask@3.1.0 — FULLY_VERIFIED (47 functions verified)\n✓ requests@2.33.1 — FULLY_VERIFIED (176 functions verified)\n```\n\n**`cygnus verify` works alongside your existing package manager** — npm, pip, cargo, gem all still work normally. Cygnus adds a verification gate on top of whatever you already use.\n\nFor a faster install path, `cygnus install` is an *optional* alternative that uses pre-compiled artifacts (Python 19x, Go 20x, Node 3x faster in CI). You can use it or stick with `pip install` / `npm install` — your choice.\n\nFor CI: see the `how do I use cygnus in CI?` question, or just add this to your GitHub Actions workflow:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    ecosystem: python\n```\n\nFree tier: the daily quota. Need more? Ask about \"adding tokens.\"\n\nClosing — reopen for specific questions about your setup."
+    },
+    {
+      "name": "add-more-tokens",
+      "pattern": "(?i)(more tokens|add tokens|top.?up|recharge|add.*balance|add.*credit|out of tokens|ran out|usage limit|rate.?limit|deposit more)",
+      "label": "question/billing",
+      "close": true,
+      "reply": "To add to your balance:\n\n```bash\ncygnus deposit <USD>\n```\n\nValid amounts: see pricing page up to (see pricing page) per deposit. Larger needs → email <support@blackswan-software.ai> for Enterprise pricing (platform fee + per-use rates).\n\n**How it works:**\n1. `cygnus deposit <USD>` opens a Stripe Checkout URL in your browser\n2. Pay with card → Stripe → our auth service → balance credited\n3. Balance never expires; carries across sessions\n\n**Check your balance:**\n\n```bash\ncygnus account\n```\n\nShows current balance, total deposited, recent charges, Stripe status.\n\n**If you're hitting free-tier limits (the daily quota):**\n- Wait until midnight UTC (counter resets)\n- Or see pricing page to move to Verified tier (no daily cap, pay-per-use)\n\nClosing — reopen if `cygnus deposit` returns a stub URL (means Stripe isn't yet enabled — separate tracker)."
+    },
+    {
+      "name": "what-is-cygnus-lock",
+      "pattern": "(?i)(what.*cygnus\\.lock|cygnus.lock.*format|lockfile.*purpose|what.*lockfile|why.*lockfile|explain.*lock)",
+      "label": "question/concept",
+      "close": true,
+      "reply": "`cygnus.lock` is a small JSON manifest that lists your project's libraries pinned to specific verified versions. Think of it like `package-lock.json` or `Gemfile.lock` — same idea, but the versions are Cygnus-verified-and-signed instead of just registry-installed.\n\n**What's in it:**\n- One entry per library: name, version, ecosystem, expected SHA-256, verification grade at the time of lock\n- A top-level `lock_version` so we can evolve the format safely\n\n**When to regenerate:**\n- After upgrading any dependency\n- When `cygnus verify --from-lock` reports a grade mismatch (means we re-graded since you locked)\n\n**Commands:**\n\n```bash\ncygnus lock                              # generate (auto-detects ecosystem)\ncygnus verify --from-lock                # check every library in the lock\ncygnus verify --from-lock --auto-lock    # auto-generate if missing (CI-friendly)\n```\n\nCommit `cygnus.lock` to git alongside your other lockfiles. CI then verifies it on every PR.\n\nClosing — reopen for specific lockfile-format questions."
+    },
+    {
       "name": "soc2-hipaa-compliance",
       "pattern": "(?i)(soc.?2|soc ii|hipaa|iso.?27001|pci.?dss|fedramp|compliance.*cert|regulated industry|audit ready)",
       "label": "question/enterprise",
       "close": false,
       "reply": "Compliance certifications (SOC2 Type II / HIPAA / ISO 27001 / FedRAMP) are on our pre-Enterprise roadmap.\n\nWhat we have today that maps to those frameworks:\n- Hashed API keys (not plaintext storage)\n- Authenticated origin via Cloudflare AOP\n- Encrypted transport (TLS 1.2+)\n- Tenant isolation via per-key rate limiting\n- Internal secrets audit completed 2026-04-20\n- External audit on the pre-Enterprise roadmap\n\nIf you're in a regulated industry and exploring Cygnus, please email <support@blackswan-software.ai> with your compliance requirements — we can prioritize whichever certification matches your timeline.\n\nLeaving open as a tracking request."
-    },
-    {
-      "name": "ci-integration-help",
-      "pattern": "(?i)(github action|gitlab ci|circleci|jenkins|ci pipeline|how.*use.*ci|integrate.*ci|use in ci)",
-      "label": "question/ci",
-      "close": true,
-      "reply": "For GitHub Actions, we publish a composite Action:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    ecosystem: python  # or npm/go/maven/etc\n```\n\nThis handles sha256-verified CLI download (linux-x86_64, linux-arm64, darwin-arm64), then runs `cygnus verify --ci` against your lockfile. Full docs in the [README](https://github.com/blackswan-software/cygnus-cli#use-in-github-actions).\n\nFor GitLab CI / CircleCI / Jenkins / others, the recipe is:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\nexport PATH=\"$HOME/.local/bin:$PATH\"\ncygnus verify --ci --from-lock\n```\n\n`--ci` returns non-zero on any grade below your threshold (default `FULLY_VERIFIED`). Combine with `--auto-lock` if you don't commit `cygnus.lock`.\n\nClosing — reopen if you hit a specific CI provider that needs example config."
     },
     {
       "name": "report-wrong-grade",
