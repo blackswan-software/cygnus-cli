@@ -14,7 +14,12 @@
 # 15 ecosystems: Python, Node, Go, Rust, Java, C#, Ruby, PHP,
 #                Kotlin, Scala, Swift, Dart, Elixir, C++, Erlang
 
-set -euo pipefail
+# POSIX sh-compatible: 'set -eu' works on dash (Debian/Ubuntu default sh)
+# AND bash. Originally was 'set -euo pipefail' but pipefail is bash-only
+# and broke the documented `curl ... | sh` invocation on Debian/Ubuntu.
+# Every curl/download is checked individually via set -e, so pipefail
+# isn't load-bearing here.
+set -eu
 
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -26,9 +31,9 @@ CDN_URL="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
 # binaries to BOTH cli/<version>/ and cli/latest/ (see build.yml release job).
 CLI_VERSION="${CYGNUS_VERSION:-latest}"
 
-info()  { echo -e "${CYAN}cygnus${NC} $*"; }
-ok()    { echo -e "${GREEN}  ✓${NC} $*"; }
-fail()  { echo -e "${RED}  ✗${NC} $*"; exit 1; }
+info()  { printf "%b\n" "${CYAN}cygnus${NC} $*"; }
+ok()    { printf "%b\n" "${GREEN}  ✓${NC} $*"; }
+fail()  { printf "%b\n" "${RED}  ✗${NC} $*"; exit 1; }
 
 # ── Pre-execution disclosure ────────────────────────────────────────
 # Shown FIRST when piped to sh — gives security-aware users a chance
@@ -36,22 +41,22 @@ fail()  { echo -e "${RED}  ✗${NC} $*"; exit 1; }
 # Skip with CYGNUS_NO_PREAMBLE=1 (useful for CI/automation).
 if [ "${CYGNUS_NO_PREAMBLE:-}" != "1" ]; then
     echo ""
-    echo -e "${BOLD}Cygnus CLI v${CLI_VERSION} — installer${NC}"
+    printf "%b\n" "${BOLD}Cygnus CLI v${CLI_VERSION} — installer${NC}"
     echo "─────────────────────────────────────────────────"
-    echo -e "${BOLD}Will:${NC}"
+    printf "%b\n" "${BOLD}Will:${NC}"
     echo "  • Download ~8 MB binary from cygnus-registry.sfo3.cdn.digitaloceanspaces.com"
     echo "  • Verify SHA-256 against the published checksum (same CDN, separate file)"
     echo "  • Install to ${INSTALL_DIR}/cygnus  (no sudo, no system changes)"
     echo ""
-    echo -e "${BOLD}Won't:${NC}"
+    printf "%b\n" "${BOLD}Won't:${NC}"
     echo "  • Modify ~/.bashrc / ~/.zshrc  (prints PATH hint, never writes)"
     echo "  • Send telemetry or analytics"
     echo "  • Run on startup / install daemons"
     echo "  • Touch pip / npm / brew / cargo  (works alongside, never replaces)"
     echo ""
-    echo -e "${BOLD}Reverse:${NC}  rm ${INSTALL_DIR}/cygnus"
-    echo -e "${BOLD}Source:${NC}   https://github.com/blackswan-software/cygnus-cli/blob/main/install.sh"
-    echo -e "${BOLD}Issues:${NC}   https://github.com/blackswan-software/cygnus-cli/issues"
+    printf "%b\n" "${BOLD}Reverse:${NC}  rm ${INSTALL_DIR}/cygnus"
+    printf "%b\n" "${BOLD}Source:${NC}   https://github.com/blackswan-software/cygnus-cli/blob/main/install.sh"
+    printf "%b\n" "${BOLD}Issues:${NC}   https://github.com/blackswan-software/cygnus-cli/issues"
     echo "─────────────────────────────────────────────────"
     echo "Continuing in 3 seconds. Press Ctrl-C to abort + review."
     echo ""
@@ -127,7 +132,7 @@ if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
     echo ""
     info "Add to PATH (add to ~/.bashrc or ~/.zshrc):"
     echo ""
-    echo -e "  ${DIM}export PATH=\"$INSTALL_DIR:\$PATH\"${NC}"
+    printf "%b\n" "  ${DIM}export PATH=\"$INSTALL_DIR:\$PATH\"${NC}"
     echo ""
 fi
 
@@ -135,12 +140,12 @@ fi
 echo ""
 info "Cygnus CLI installed!"
 echo ""
-echo -e "  ${CYAN}Get started:${NC}"
+printf "%b\n" "  ${CYAN}Get started:${NC}"
 echo "    cygnus verify flask          # check a library"
 echo "    cygnus auth signup           # create free account"
 echo "    cygnus check                 # scan for CVEs"
 echo ""
-echo -e "  ${DIM}Free: grade + CVE for the daily quota. No payment required.${NC}"
-echo -e "  ${DIM}Deposit \(see pricing page) for full tokens + artifacts (pay-as-you-go).${NC}"
+printf "%b\n" "  ${DIM}Free: grade + CVE for the daily quota. No payment required.${NC}"
+printf "%b\n" "  ${DIM}Deposit \(see pricing page) for full tokens + artifacts (pay-as-you-go).${NC}"
 echo ""
-echo -e "  ${DIM}Docs: https://blackswan-software.ai${NC}"
+printf "%b\n" "  ${DIM}Docs: https://blackswan-software.ai${NC}"
