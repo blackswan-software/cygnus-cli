@@ -127,7 +127,7 @@ cygnus sbom -o sbom.json
 # Download signed artifact
 cygnus install flask
 
-# Sign up for free tier (the daily quota, no payment)
+# Sign up — no payment, no card
 cygnus auth signup
 
 # Report a bug
@@ -146,11 +146,7 @@ Python, Node.js, Go, Rust, Java, C#, Ruby, PHP, Kotlin, Scala, Swift, Dart, Elix
 
 ## Pricing
 
-- **Free** — Grade + CVE for 5 libraries/day. No payment required.
-- **Verified** — Verified-tier minimum. Pay-as-you-go: verify, SBOM, signed artifacts. Balance never expires.
-- **Enterprise** — platform fee. Attestations, audit docs, drift alerts, priority support.
-
-[blackswan-software.ai/pricing](https://blackswan-software.ai/pricing)
+Free tier available, Verified and Enterprise tiers offered. Full pricing at [blackswan-software.ai/pricing](https://blackswan-software.ai/pricing).
 
 ---
 

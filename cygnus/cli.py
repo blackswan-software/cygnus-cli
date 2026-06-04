@@ -746,8 +746,8 @@ def cmd_install(args):
 
     # Prompt signup if no API key (first-time user)
     if not API_KEY and not ci_mode:
-        print("  Tip: Run 'cygnus auth signup' for a free account (the daily quota)")
-        print("       See pricing page for full tokens + artifacts (pay-as-you-go, no subscription)")
+        print("  Tip: Run 'cygnus auth signup' for a free account")
+        print("       See https://blackswan-software.ai/pricing for paid tiers (pay-as-you-go, no subscription)")
         print()
 
     print(f"cygnus install {ecosystem}/{library}@{version}")
@@ -2149,7 +2149,7 @@ def cmd_auth_signup(args):
 
     Usage:
       cygnus auth signup                      # free tier (any email)
-      cygnus auth signup --tier verified      # pay-as-you-go (see pricing page)
+      cygnus auth signup --tier verified      # pay-as-you-go (deposit required, see website)
       cygnus auth signup --tier enterprise    # enterprise (corporate email required)
     """
     tier_choice = getattr(args, "tier", "free") or "free"
@@ -2410,7 +2410,7 @@ def cmd_auth_cancel(args):
         return
 
     print("  This will cancel your paid subscription.")
-    print("  Your account stays active on the free tier (the daily quota).")
+    print("  Your account stays active on the free tier.")
     print("  Your API key continues to work.")
     confirm = input("  Cancel subscription? [y/N]: ").strip().lower()
     if confirm != "y":
@@ -2430,7 +2430,7 @@ def cmd_auth_cancel(args):
         print(f"  Tier: {data.get('new_tier', 'free').upper()}")
         if data.get("active_until"):
             print(f"  Active until: {data['active_until'][:10]} (paid period ends)")
-        print(f"\n  Your API key still works for free tier (the daily quota).")
+        print(f"\n  Your API key still works for free tier.")
         print(f"  To reactivate: visit https://blackswan-software.ai/pricing")
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -2517,19 +2517,19 @@ def cmd_deposit(args):
     page; this command polls /auth/billing/balance to surface the new total.
 
     Usage:
-      cygnus deposit <USD>         # see pricing page
+      cygnus deposit <USD>      # see website for current minimum
       cygnus deposit 50 --no-open  # don't auto-open browser; print URL only
     """
     amount_usd = int(getattr(args, "amount", 0) or 0)
     if amount_usd < 10:
-        print("  Error: minimum deposit is (see pricing page).", file=sys.stderr)
+        print("  Error: deposit below minimum. See https://blackswan-software.ai/pricing for current minimum.", file=sys.stderr)
         sys.exit(1)
-    # Backend MAX_DEPOSIT_CENTS = (see pricing page). Fail-fast client-side to avoid a
+    # Backend enforces deposit cap (see config). Fail-fast client-side to avoid a
     # wasted Stripe API roundtrip; point users above the cap toward Enterprise.
     if amount_usd > 1000:
-        print(f"  Error: maximum single deposit is Verified-tier cap.", file=sys.stderr)
+        print(f"  Error: deposit exceeds maximum. See {url} for current cap.".format(url="https://blackswan-software.ai/pricing"), file=sys.stderr)
         print(f"  Need more? Multiple deposits work, or contact support@blackswan-software.ai", file=sys.stderr)
-        print(f"  for Enterprise pricing (platform fee + per-use rates).", file=sys.stderr)
+        print(f"  or contact support@blackswan-software.ai for Enterprise pricing.", file=sys.stderr)
         sys.exit(1)
     amount_cents = amount_usd * 100
 
@@ -2743,7 +2743,7 @@ def cmd_auth(args):
         cmd_auth_reset_key(args)
     else:
         print("Usage: cygnus auth <signup|login|status|logout|cancel|forgot-key|reset-key>")
-        print("  signup       — create account (free or Verified-tier deposit pay-as-you-go)")
+        print("  signup       — create account (free; pay-as-you-go available)")
         print("  login        — authenticate with existing API key")
         print("  status       — show current auth state + balance")
         print("  logout       — clear stored credentials")
@@ -2826,10 +2826,10 @@ def _first_run_onboarding():
         print("    cygnus verify               Scan this project's dependencies")
         print("    cygnus verify <library>      Check a specific library")
         print("    cygnus check                 Scan for known CVEs")
-        print("    cygnus auth signup           Create account (free, the daily quota)")
+        print("    cygnus auth signup           Create account (free)")
         print()
-        print("  Free: grade + CVE for the daily quota. No payment required.")
-        print("  See pricing page for full tokens + artifacts (pay-as-you-go, no subscription).")
+        print("  Free: grade + CVE per the documented daily quota. No payment required.")
+        print("  See https://blackswan-software.ai/pricing for paid tiers (pay-as-you-go, no subscription).")
 
     else:
         # Returning user
@@ -3049,7 +3049,7 @@ def main():
     auth_sub = p_auth.add_subparsers(dest="auth_command")
     p_signup = auth_sub.add_parser("signup", help="Create account (free or pay-as-you-go)")
     p_signup.add_argument("--tier", choices=["free", "verified", "enterprise"], default="free",
-                          help="Account tier (verified=Verified-tier deposit pay-as-you-go, enterprise=contact us)")
+                          help="Account tier (verified=pay-as-you-go, enterprise=contact us)")
     auth_sub.add_parser("login", help="Authenticate with your Cygnus API key")
     auth_sub.add_parser("status", help="Show current auth state and key fingerprint")
     auth_sub.add_parser("logout", help="Clear stored credentials")
@@ -3074,7 +3074,7 @@ def main():
     p_deposit = sub.add_parser("deposit",
                                help="Add funds to your account via Stripe Checkout (opens browser)")
     p_deposit.add_argument("amount", type=int, metavar="USD",
-                           help="Amount in USD (see pricing page — e.g. 'cygnus deposit <USD>' = (see pricing page))")
+                           help="Amount in USD (see https://blackswan-software.ai/pricing for current minimum)")
     p_deposit.add_argument("--no-open", action="store_true",
                            help="Don't auto-open the browser; print the checkout URL only")
 
