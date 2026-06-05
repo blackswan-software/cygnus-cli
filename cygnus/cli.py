@@ -282,6 +282,68 @@ def _queue_compilation(ecosystem: str, library: str, version: str = "latest"):
         pass  # Best-effort — don't block CLI on queue failure
 
 
+def cmd_request(args):
+    """Explicitly request verification for a library.
+
+    `cygnus verify` auto-queues when a lib isn't in the corpus at all,
+    but for libs that ARE in the corpus at a lower confidence
+    (ATTESTATION_ONLY, ALL_OK, TESTS_PASS) the auto-queue path doesn't
+    fire — the user just sees a confidence grade and no next action.
+    `request` always enqueues with explicit feedback.
+
+    2026-06-05: added after a fresh-user run reported "Step 4 request
+    verification: documented command doesn't exist; issue fallback
+    crashes — no path to the core promise". The fresh-user pattern was
+    (a) `cygnus verify spdlog` returns ATTESTATION_ONLY, (b) user wants
+    to bump it to FULLY_VERIFIED, (c) tries a non-existent `cygnus
+    request`, (d) tries `cygnus issue` and hits BUG 5 NameError.
+    """
+    _check_tos()
+    library = args.library
+    version = getattr(args, "version", None) or "latest"
+    ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
+
+    print(f"\n  Requesting verification: {ecosystem}/{library}@{version}")
+
+    # POST to /compile/queue (same endpoint as _queue_compilation but
+    # with explicit-source so the queue can prioritize differently).
+    url = f"{REGISTRY_URL}/compile/queue"
+    payload = json.dumps({
+        "ecosystem": ecosystem,
+        "library": library,
+        "version": version,
+        "priority": 2,  # explicit > auto
+        "source": "cli-request",
+    }).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "cygnus-cli/1.0")
+    if API_KEY:
+        req.add_header("X-API-Key", API_KEY)
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    status = data.get("status", "queued")
+    print(f"  ✓ {status.capitalize()}.")
+    print()
+    print(f"  Most libraries verify in 1–5 minutes. Run:")
+    print(f"    cygnus verify {library}")
+    print(f"  to check status.")
+
+
 def _download(url: str, dest: Path) -> bool:
     """Download a file, return True on success."""
     try:
@@ -1565,6 +1627,15 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     print(f"  {'─' * 40}")
     print(f"  Confidence:  {confidence} {grade}")
     print(f"  Tokens:      {token_count} verified function signatures" if token_count else "  Tokens:      not extracted yet")
+    # 2026-06-05: when a lib is in the corpus but at a low grade, the
+    # previous output gave the user no next action. Surface the
+    # `cygnus request` hint so the path to FULLY_VERIFIED is obvious.
+    # Skip the hint at FULLY_VERIFIED (already done) and at
+    # SECURITY_ISSUE_DETECTED (different problem — fix the lib, don't
+    # re-queue it).
+    _hint_low_confidence = confidence not in (
+        "FULLY_VERIFIED", "SECURITY_ISSUE_DETECTED", "RATE_LIMITED",
+    )
     if functions:
         print(f"  Functions:   {', '.join(functions[:5])}")
         if len(functions) > 5:
@@ -1613,6 +1684,12 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     if badge_url:
         print(f"  Badge:       {REGISTRY_URL}{badge_url}")
     print(f"  SBOM:        {REGISTRY_URL}{data.get('sbom_url', '')}")
+    if _hint_low_confidence:
+        # Surface the next action — `cygnus request` enqueues an explicit
+        # verification cycle so the user has a path to FULLY_VERIFIED
+        # instead of staring at ATTESTATION_ONLY.
+        print()
+        print(f"  → cygnus request {library}  # enqueue full verification (1–5 min)")
     print()
 
     return {
@@ -1921,6 +1998,84 @@ def _parse_lockfile(ecosystem: str) -> list[str]:
                             deps.append(parts[1])  # artifact name
                 except Exception:
                     pass
+
+    elif ecosystem == "cpp":
+        # 2026-06-05: cpp parse-lockfile branch was missing entirely. The
+        # ecosystem was listed in the detection table at line 324, but
+        # without this branch _parse_lockfile returned [] and the user
+        # saw "No lockfile found" in any C++ project. Reported by a
+        # fresh-user run ("Step 3 scan: per-lib verify/CVE works (keyless);
+        # no project-wide C++ scan").
+        #
+        # Priority: vcpkg.json > conanfile.txt > conanfile.py > CMakeLists.txt.
+        # vcpkg.json is the cleanest (structured JSON); the others are
+        # regex-grade fallbacks since arbitrary CMake can do anything.
+        import re
+        vcpkg = cwd / "vcpkg.json"
+        if vcpkg.exists():
+            try:
+                data = json.loads(vcpkg.read_text())
+                for dep in data.get("dependencies", []) or []:
+                    if isinstance(dep, str):
+                        deps.append(dep)
+                    elif isinstance(dep, dict) and dep.get("name"):
+                        name = dep["name"]
+                        deps.append(name)
+                        if dep.get("version>="):
+                            _LOCKFILE_VERSIONS[name] = dep["version>="]
+                return deps
+            except Exception:
+                pass
+        conan_txt = cwd / "conanfile.txt"
+        if conan_txt.exists():
+            try:
+                in_requires = False
+                for line in conan_txt.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("["):
+                        in_requires = line.lower() == "[requires]"
+                        continue
+                    if in_requires:
+                        # name/version[@user/channel]
+                        name = line.split("/")[0].strip()
+                        if name:
+                            deps.append(name)
+                            if "/" in line:
+                                ver = line.split("/", 1)[1].split("@")[0].strip()
+                                if ver:
+                                    _LOCKFILE_VERSIONS[name] = ver
+                return deps
+            except Exception:
+                pass
+        conan_py = cwd / "conanfile.py"
+        if conan_py.exists():
+            try:
+                text = conan_py.read_text()
+                # Match: requires = "name/ver", self.requires("name/ver")
+                for m in re.finditer(r'["\']([a-z0-9_-]+)/([0-9][^"\'@]*)', text):
+                    name, ver = m.group(1), m.group(2)
+                    deps.append(name)
+                    _LOCKFILE_VERSIONS[name] = ver
+                return deps
+            except Exception:
+                pass
+        cmakelists = cwd / "CMakeLists.txt"
+        if cmakelists.exists():
+            try:
+                text = cmakelists.read_text()
+                # Match: find_package(NAME ...) — coarse but useful
+                for m in re.finditer(r'find_package\s*\(\s*([A-Za-z_][A-Za-z0-9_]+)', text):
+                    name = m.group(1)
+                    # Skip CMake built-ins that aren't real libraries.
+                    if name in {"Threads", "PkgConfig", "Git", "Python",
+                                 "Python3", "Python2", "Doxygen"}:
+                        continue
+                    if name not in deps:
+                        deps.append(name)
+            except Exception:
+                pass
 
     return deps
 
@@ -2914,6 +3069,14 @@ def cmd_issue(args):
       1. Try `gh issue create` (if user has gh CLI) — best UX
       2. Fallback: print a github.com URL with the body pre-filled
     """
+    # 2026-06-05: `subprocess` is used at lines 2956 ($EDITOR launch) and
+    # 2984 (gh issue create) — both inside this function — but was never
+    # imported at module scope OR inside this function. When the caller
+    # supplied --body (skipping the editor block) execution went straight
+    # to the gh call and crashed with NameError. Surfaced by a fresh-user
+    # run as "Step 4 ... issue fallback crashes". Import here so both
+    # subprocess paths work.
+    import subprocess
     import platform
     import urllib.parse
 
@@ -3161,10 +3324,25 @@ def cmd_extension_install(args):
 
 
 def main():
+    # `__version__` is set in cygnus/__init__.py and shipped in every
+    # release. Falling back to "unknown" lets test environments that
+    # import cli.py without a built package still register the flag.
+    try:
+        from . import __version__ as _cli_version
+    except Exception:
+        _cli_version = "unknown"
+
     parser = argparse.ArgumentParser(
         prog="cygnus",
         description="Pre-compiled artifacts alongside your package manager.",
     )
+    # 2026-06-05: `cygnus --version` previously argparse-errored because the
+    # flag was never registered, even though __version__ exists in the
+    # package. Surfaced by a fresh-user run as "Step 1 install: present,
+    # but cygnus --version errors (can't tell what I have)". Registering
+    # here so users can sanity-check their install in one keystroke.
+    parser.add_argument("--version", "-V", action="version",
+                        version=f"cygnus {_cli_version}")
     parser.add_argument("--ecosystem", "-e", default=None,
                         help="Ecosystem (default: auto-detect, or python)")
     parser.add_argument("--no-cache", action="store_true",
@@ -3247,6 +3425,22 @@ def main():
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
 
+    # `cygnus request <library>` — explicit verification request. `verify`
+    # already auto-queues when a lib isn't in the corpus, but for users
+    # whose lib IS in the corpus at a lower confidence (ATTESTATION_ONLY,
+    # ALL_OK, etc.) the auto-queue path doesn't run. `request` always
+    # enqueues, gives clear feedback, and bypasses the "I see ATTESTATION_
+    # ONLY and don't know what to do" dead-end surfaced in the 2026-06-05
+    # fresh-user report.
+    p_request = sub.add_parser(
+        "request",
+        help="Request verification for a library — auto-queues compilation + token extraction",
+    )
+    p_request.add_argument("library",
+                           help="Library name (e.g. spdlog, nlohmann/json)")
+    p_request.add_argument("version", nargs="?", default="latest",
+                           help="Version (default: latest)")
+
     # ── Editor extensions ─────────────────────────────────────────────────
     # `cygnus extension install vscode` — distributes the VS Code extension
     # from the cygnus-cli GitHub releases page without depending on the
@@ -3325,6 +3519,8 @@ def main():
         cmd_issue(args)
     elif args.command == "extension":
         cmd_extension(args)
+    elif args.command == "request":
+        cmd_request(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
