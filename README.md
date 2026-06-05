@@ -138,6 +138,25 @@ Full command reference: `cygnus --help`
 
 ---
 
+## Editor extension (VS Code, Cursor, VSCodium)
+
+The Cygnus VS Code extension ships as a `.vsix` from this repo's
+[releases page](https://github.com/blackswan-software/cygnus-cli/releases) —
+no Microsoft Marketplace account or Open VSX dependency.
+
+```sh
+cygnus auth login                  # one-time, writes ~/.cygnus/config.json
+cygnus extension install vscode    # downloads latest .vsix and installs
+```
+
+The extension reads the same `~/.cygnus/config.json` the CLI writes, so a
+single `cygnus auth login` covers both. Inline import verification, hover
+details, and command-palette actions across all 14 supported ecosystems.
+
+Source + e2e tests live in [vscode-extension/](./vscode-extension/).
+
+---
+
 ## Supported Ecosystems
 
 Python, Node.js, Go, Rust, Java, C#, Ruby, PHP, Kotlin, Scala, Swift, Dart, Elixir, C++, Erlang.

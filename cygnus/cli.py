@@ -3003,6 +3003,163 @@ def cmd_issue(args):
     print(f"  Thank you, {name}. We read every report.")
 
 
+# ── Editor extensions ─────────────────────────────────────────────────────
+# The Cygnus VS Code extension is shipped from the cygnus-cli GitHub
+# release page (no Microsoft Marketplace / Open VSX dependency). The
+# distribution flow is:
+#
+#   cygnus extension install vscode
+#     → resolves latest .vsix URL from GitHub releases
+#     → downloads to /tmp
+#     → shells out to `code --install-extension /tmp/cygnus-<ver>.vsix`
+#
+# Editor binary discovery handles VS Code (`code`), Cursor (`cursor`),
+# VSCodium (`codium`) and Insiders (`code-insiders`). The extension
+# itself reads ~/.cygnus/config.json on activation so a user only ever
+# pastes their API key once (via `cygnus auth login`).
+EXTENSION_RELEASE_REPO = "blackswan-software/cygnus-cli"
+
+_EDITOR_BINARIES = {
+    "vscode":   ["code", "code-insiders"],
+    "code":     ["code", "code-insiders"],
+    "cursor":   ["cursor"],
+    "codium":   ["codium", "vscodium"],
+    "vscodium": ["codium", "vscodium"],
+}
+
+
+def _find_editor_binary(editor: str) -> str | None:
+    """Locate the editor's `code`-style CLI on $PATH."""
+    import shutil
+    for candidate in _EDITOR_BINARIES.get(editor, []):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def _resolve_latest_vsix_url() -> str | None:
+    """Find the most recent .vsix asset on the cygnus-cli release page.
+
+    Returns None on any failure so the caller can surface a clean error
+    message. We deliberately do NOT inject the GH token from the
+    environment — anonymous access is rate-limited but works for the
+    once-per-install use case.
+    """
+    api = f"https://api.github.com/repos/{EXTENSION_RELEASE_REPO}/releases/latest"
+    try:
+        req = urllib.request.Request(api, headers={"User-Agent": "cygnus-cli/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return None
+    for asset in data.get("assets", []) or []:
+        name = asset.get("name", "")
+        if name.endswith(".vsix"):
+            url = asset.get("browser_download_url")
+            if url:
+                return url
+    return None
+
+
+def cmd_extension(args):
+    """Dispatch `cygnus extension <subcommand>`."""
+    sub = getattr(args, "extension_command", None)
+    if sub == "install":
+        cmd_extension_install(args)
+    else:
+        print("Usage: cygnus extension install [vscode|cursor|codium] [options]")
+        print()
+        print("  Distributes the Cygnus editor extension without the Microsoft")
+        print("  Marketplace. Pulls the latest .vsix from the cygnus-cli release")
+        print("  page on GitHub and invokes the editor's --install-extension flag.")
+
+
+def cmd_extension_install(args):
+    """Download + install the Cygnus VS Code extension into the chosen editor."""
+    import subprocess
+    import tempfile
+
+    editor = getattr(args, "editor", "vscode") or "vscode"
+    binary = _find_editor_binary(editor)
+    if not binary:
+        candidates = ", ".join(_EDITOR_BINARIES.get(editor, []))
+        print(
+            f"  Error: could not find a {editor} CLI on $PATH "
+            f"(looked for: {candidates}).",
+            file=sys.stderr,
+        )
+        print(
+            "  Open VS Code → command palette → "
+            "'Shell Command: Install code command in PATH'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Local .vsix wins (lets you smoke-test before a release).
+    vsix_local = getattr(args, "vsix_file", None)
+    if vsix_local:
+        if not Path(vsix_local).is_file():
+            print(f"  Error: {vsix_local} not found.", file=sys.stderr)
+            sys.exit(1)
+        target = vsix_local
+    else:
+        vsix_url = getattr(args, "vsix_url", None) or _resolve_latest_vsix_url()
+        if not vsix_url:
+            print(
+                "  Error: could not find a .vsix asset on the latest "
+                f"{EXTENSION_RELEASE_REPO} release.",
+                file=sys.stderr,
+            )
+            print(
+                "  Workaround: download manually + use --vsix-file. "
+                "Or open an issue with `cygnus issue`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"  Downloading {vsix_url}...")
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="cygnus-", suffix=".vsix", delete=False,
+            ) as tmp:
+                req = urllib.request.Request(
+                    vsix_url, headers={"User-Agent": "cygnus-cli/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    tmp.write(resp.read())
+                target = tmp.name
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"  Error downloading {vsix_url}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"  Installing into {editor} via {binary}...")
+    try:
+        subprocess.run(
+            [binary, "--install-extension", target, "--force"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(
+            f"  Error: {binary} --install-extension returned exit {e.returncode}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"  Error: {binary} not executable (was found on $PATH).",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print()
+    print("  ✓ Cygnus extension installed.")
+    if API_KEY:
+        print("  ✓ Existing API key in ~/.cygnus/config.json will be picked up "
+              "automatically.")
+    else:
+        print("  Run `cygnus auth login` to authenticate (or leave blank for the "
+              "free tier — 100 lookups/day).")
+    print("  Restart your editor to activate.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cygnus",
@@ -3090,6 +3247,37 @@ def main():
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
 
+    # ── Editor extensions ─────────────────────────────────────────────────
+    # `cygnus extension install vscode` — distributes the VS Code extension
+    # from the cygnus-cli GitHub releases page without depending on the
+    # Microsoft Marketplace or Open VSX. Users get one-shot install:
+    #   cygnus auth login
+    #   cygnus extension install vscode
+    # and the extension picks up the API key the CLI just wrote.
+    p_extension = sub.add_parser(
+        "extension",
+        help="Install editor extensions (VS Code / Cursor / VSCodium)",
+    )
+    extension_sub = p_extension.add_subparsers(dest="extension_command")
+    p_ext_install = extension_sub.add_parser(
+        "install",
+        help="Install the Cygnus editor extension",
+    )
+    p_ext_install.add_argument(
+        "editor", nargs="?", default="vscode",
+        choices=["vscode", "code", "cursor", "codium", "vscodium"],
+        help="Editor to install into (default: vscode)",
+    )
+    p_ext_install.add_argument(
+        "--vsix-url", default=None,
+        help="Override the .vsix download URL (default: latest cygnus-cli "
+             "release on GitHub)",
+    )
+    p_ext_install.add_argument(
+        "--vsix-file", default=None,
+        help="Install a local .vsix file instead of downloading",
+    )
+
     args = parser.parse_args()
 
     # argparse subparsers override parent --ecosystem with None.
@@ -3135,6 +3323,8 @@ def main():
         cmd_deposit(args)
     elif args.command == "issue":
         cmd_issue(args)
+    elif args.command == "extension":
+        cmd_extension(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()

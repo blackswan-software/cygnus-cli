@@ -1,0 +1,99 @@
+{
+  "name": "cygnus",
+  "displayName": "Cygnus — Verified API Tokens",
+  "description": "Inline verification status for library imports. Shows verified function signatures, confidence levels, and token counts.",
+  "version": "0.1.0",
+  "publisher": "blackswan-software",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blackswan-software/cygnus-cli",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18.0.0"
+  },
+  "categories": ["Programming Languages", "Linters", "Other"],
+  "keywords": ["cygnus", "verification", "api", "tokens", "security", "supply-chain"],
+  "activationEvents": [
+    "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:go",
+    "onLanguage:rust",
+    "onLanguage:java",
+    "onLanguage:csharp",
+    "onLanguage:ruby",
+    "onLanguage:php",
+    "onLanguage:kotlin",
+    "onLanguage:scala",
+    "onLanguage:swift",
+    "onLanguage:dart",
+    "onLanguage:elixir"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cygnus.verify",
+        "title": "Cygnus: Verify Current File Dependencies"
+      },
+      {
+        "command": "cygnus.verifyLibrary",
+        "title": "Cygnus: Verify Library..."
+      },
+      {
+        "command": "cygnus.showTokens",
+        "title": "Cygnus: Show Function Tokens"
+      },
+      {
+        "command": "cygnus.compose",
+        "title": "Cygnus: Compose Token Graph"
+      }
+    ],
+    "configuration": {
+      "title": "Cygnus",
+      "properties": {
+        "cygnus.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Cygnus API key (free tier: 100 lookups/day). Leave blank to use the key stored by `cygnus auth login`."
+        },
+        "cygnus.registryUrl": {
+          "type": "string",
+          "default": "https://cygnus.blackswan-software.ai",
+          "description": "Cygnus registry URL"
+        },
+        "cygnus.showInlineStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show verification status inline on import statements"
+        },
+        "cygnus.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show verification summary in status bar"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/run-tests.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.3.10",
+    "@vscode/vsce": "^2.22.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.0"
+  }
+}
