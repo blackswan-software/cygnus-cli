@@ -251,6 +251,7 @@ def _trigger_on_demand(ecosystem: str, library: str, version: str = "latest") ->
     }).encode()
     req = urllib.request.Request(url, data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "cygnus-cli/1.0")
     if API_KEY:
         req.add_header("X-API-Key", API_KEY)
     try:
@@ -272,6 +273,7 @@ def _queue_compilation(ecosystem: str, library: str, version: str = "latest"):
     }).encode()
     req = urllib.request.Request(url, data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "cygnus-cli/1.0")
     if API_KEY:
         req.add_header("X-API-Key", API_KEY)
     try:
@@ -2643,7 +2645,7 @@ def cmd_auth_forgot_key(args):
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/forgot-key",
         data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -2682,7 +2684,7 @@ def cmd_auth_reset_key(args):
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/reset-key/{token}",
         data=b"", method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -2893,12 +2895,13 @@ def _get_user_email() -> str:
     if isinstance(data, dict) and data.get("email"):
         return data["email"]
     try:
+        import subprocess
         r = subprocess.run(
             ["git", "config", "user.email"],
             capture_output=True, text=True, timeout=2,
         )
         return r.stdout.strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (Exception,):
         return ""
 
 
