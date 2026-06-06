@@ -282,123 +282,6 @@ def _queue_compilation(ecosystem: str, library: str, version: str = "latest"):
         pass  # Best-effort — don't block CLI on queue failure
 
 
-def cmd_help(args):
-    """Print the full command list grouped by purpose.
-
-    `cygnus -h` / `--help` give argparse's terse one-liner per
-    subcommand. `cygnus help` adds the per-group structure a new
-    user actually wants — what to run first, what to reach for when
-    locked out, what's CI-only, etc.
-    """
-    print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
-    sections = [
-        ("Account", [
-            ("signup",     "Create an account (free; pay-as-you-go optional)"),
-            ("login",      "Authenticate with an existing API key"),
-            ("status",     "Show current key fingerprint + tier + balance"),
-            ("logout",     "Clear stored credentials"),
-            ("forgotkey",  "Email a one-time token to rotate your key"),
-            ("userkey",    "Consume an emailed token — rotates + stores the new key"),
-            ("cancel",     "Cancel subscription (account stays on free tier)"),
-            ("uninstall",  "Cancel subscription + remove ALL local data"),
-        ]),
-        ("Verification (main loop)", [
-            ("verify",     "Verify one library or every dep in your lockfile"),
-            ("request",    "Explicitly enqueue a library for full verification"),
-            ("install",    "Download a pre-compiled, signed artifact"),
-            ("list",       "Show installed Cygnus artifacts vs native"),
-            ("check",      "Check for updates + CVEs"),
-            ("lock",       "Generate/refresh cygnus.lock"),
-            ("sbom",       "Export CycloneDX SBOM"),
-        ]),
-        ("Billing", [
-            ("account",    "Show balance + recent charges (verified tier)"),
-            ("deposit",    "Open Stripe Checkout to deposit USD into balance"),
-        ]),
-        ("Tools", [
-            ("init",       "Set up ~/.cygnus/ and configure resolution"),
-            ("cache",      "Manage local response cache (clear / status)"),
-            ("extension",  "Install editor extensions (VS Code / Cursor / VSCodium)"),
-            ("issue",      "File a bug report or feature request"),
-            ("help",       "This screen"),
-        ]),
-        ("Global flags", [
-            ("--version, -V",   "Print the CLI version"),
-            ("--ecosystem, -e", "Override auto-detected ecosystem"),
-            ("--no-cache",      "Bypass local cache (always hit API)"),
-        ]),
-    ]
-    for title, entries in sections:
-        print(f"  {title}")
-        for cmd, desc in entries:
-            print(f"    {cmd:<14}  {desc}")
-        print()
-    print("Per-command flags: cygnus <command> --help")
-    print("Source: https://github.com/blackswan-software/cygnus-cli")
-
-
-def cmd_request(args):
-    """Explicitly request verification for a library.
-
-    `cygnus verify` auto-queues when a lib isn't in the corpus at all,
-    but for libs that ARE in the corpus at a lower confidence
-    (ATTESTATION_ONLY, ALL_OK, TESTS_PASS) the auto-queue path doesn't
-    fire — the user just sees a confidence grade and no next action.
-    `request` always enqueues with explicit feedback.
-
-    2026-06-05: added after a fresh-user run reported "Step 4 request
-    verification: documented command doesn't exist; issue fallback
-    crashes — no path to the core promise". The fresh-user pattern was
-    (a) `cygnus verify spdlog` returns ATTESTATION_ONLY, (b) user wants
-    to bump it to FULLY_VERIFIED, (c) tries a non-existent `cygnus
-    request`, (d) tries `cygnus issue` and hits BUG 5 NameError.
-    """
-    _check_tos()
-    library = args.library
-    version = getattr(args, "version", None) or "latest"
-    ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
-
-    print(f"\n  Requesting verification: {ecosystem}/{library}@{version}")
-
-    # POST to /compile/queue (same endpoint as _queue_compilation but
-    # with explicit-source so the queue can prioritize differently).
-    url = f"{REGISTRY_URL}/compile/queue"
-    payload = json.dumps({
-        "ecosystem": ecosystem,
-        "library": library,
-        "version": version,
-        "priority": 2,  # explicit > auto
-        "source": "cli-request",
-    }).encode()
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "cygnus-cli/1.0")
-    if API_KEY:
-        req.add_header("X-API-Key", API_KEY)
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        try:
-            detail = json.loads(body).get("detail", e.reason)
-        except Exception:
-            detail = e.reason
-        print(f"  Error: {detail}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"  Connection error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    status = data.get("status", "queued")
-    print(f"  ✓ {status.capitalize()}.")
-    print()
-    print(f"  Most libraries verify in 1–5 minutes. Run:")
-    print(f"    cygnus verify {library}")
-    print(f"  to check status.")
-
-
 def _download(url: str, dest: Path) -> bool:
     """Download a file, return True on success."""
     try:
@@ -828,6 +711,379 @@ def _native_fallback(ecosystem: str, library: str, ci_mode: bool):
         subprocess.run(full_cmd, shell=True, capture_output=True)
 
 
+def cmd_request(args):
+    """Explicitly request verification for a library.
+
+    `cygnus verify` auto-queues when a lib isn't in the corpus at all,
+    but for libs that ARE in the corpus at a lower confidence (e.g.
+    ATTESTATION_ONLY, ALL_OK, TESTS_PASS) the auto-queue path doesn't
+    fire — the user just sees a confidence grade and no next action.
+    `request` always enqueues with explicit feedback.
+
+    Surfaced 2026-06-05 fresh-user run: "documented `request` command
+    doesn't exist; `issue` fallback crashes — no path to the core
+    promise." Pinned by tests/test_cli.py::TestBypassedCommandsCanonical.
+    """
+    _check_tos()
+    library = args.library
+    version = getattr(args, "version", None) or "latest"
+    ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
+
+    print(f"\n  Requesting verification: {ecosystem}/{library}@{version}")
+
+    url = f"{REGISTRY_URL}/compile/queue"
+    payload = json.dumps({
+        "ecosystem": ecosystem,
+        "library": library,
+        "version": version,
+        "priority": 2,  # explicit > auto
+        "source": "cli-request",
+    }).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "cygnus-cli/1.0")
+    if API_KEY:
+        req.add_header("X-API-Key", API_KEY)
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    status = data.get("status", "queued")
+    print(f"  ✓ {status.capitalize()}.")
+    print()
+    print(f"  Most libraries verify in 1–5 minutes. Run:")
+    print(f"    cygnus verify {library}")
+    print(f"  to check status.")
+
+
+def cmd_deposit(args):
+    """Open Stripe Checkout in the browser to deposit USD into your account balance.
+
+    Card entry happens on Stripe's hosted page (PCI-compliant) — the CLI never
+    sees the card data. After payment, Stripe redirects to a confirmation
+    page; this command polls /auth/billing/balance to surface the new total.
+
+    Usage:
+      cygnus deposit <USD>          # minimum $10, maximum $1000 per deposit
+      cygnus deposit 50 --no-open   # don't auto-open browser; print URL only
+    """
+    amount_usd = int(getattr(args, "amount", 0) or 0)
+    if amount_usd < 10:
+        print("  Error: deposit below minimum ($10).", file=sys.stderr)
+        sys.exit(1)
+    if amount_usd > 1000:
+        print(f"  Error: deposit exceeds maximum ($1000 per transaction).", file=sys.stderr)
+        print(f"  Multiple deposits work, or contact support@blackswan-software.ai for Enterprise.", file=sys.stderr)
+        sys.exit(1)
+    amount_cents = amount_usd * 100
+
+    api_key = os.environ.get("CYGNUS_API_KEY", "") or _load_config().get("api_key", "")
+    if not api_key:
+        print("  Error: not authenticated. Run `cygnus signup` or `cygnus login`.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    return_url = "https://blackswan-software.ai/deposit/success"
+    body = {"amount_cents": amount_cents, "return_url": return_url}
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/billing/checkout",
+        data=payload, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+            "User-Agent": "cygnus-cli/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_b = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body_b).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    mode = data.get("mode", "live")
+    checkout_url = data.get("checkout_url", "")
+    if mode == "stub" or not checkout_url:
+        print(f"  Stripe is not enabled on the server (mode={mode}).")
+        print(f"  Deposit temporarily unavailable. Contact support@blackswan-software.ai if this persists.")
+        sys.exit(1)
+
+    no_open = bool(getattr(args, "no_open", False))
+    print(f"  Opening Stripe Checkout for ${amount_usd:.2f}...")
+    print(f"  URL: {checkout_url}")
+
+    if not no_open:
+        opened = False
+        for opener in ("xdg-open", "open", "start"):  # linux, macOS, windows
+            try:
+                import subprocess  # local import; standard library
+                subprocess.Popen([opener, checkout_url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        if not opened:
+            print("  (Could not auto-open browser — paste the URL above manually.)")
+
+    print()
+    print("  Complete payment in the browser, then return here.")
+    print("  Polling /auth/billing/balance for the new balance (Ctrl-C to stop)...")
+    print()
+
+    import time
+    deadline = time.time() + 300
+    initial_balance = None
+    while time.time() < deadline:
+        req = urllib.request.Request(
+            f"{REGISTRY_URL}/auth/billing/balance",
+            headers={"X-Api-Key": api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                bal = json.loads(resp.read())
+            cents = int(bal.get("balance_cents", 0))
+            if initial_balance is None:
+                initial_balance = cents
+                print(f"  Initial balance: ${initial_balance / 100:.2f}")
+            elif cents > initial_balance:
+                print(f"\n  ✓ Deposit received. New balance: ${cents / 100:.2f}")
+                return
+            else:
+                print(f"    balance: ${cents / 100:.2f}  (waiting for webhook...)", end="\r", flush=True)
+        except Exception:
+            pass
+        time.sleep(5)
+    print()
+    print("  Polling timed out after 5 minutes. The webhook may still be in flight.")
+    print("  Check balance later with: cygnus account")
+
+
+# ── Editor extensions (`cygnus extension install vscode`) ────────────────
+
+EXTENSION_RELEASE_REPO = "blackswan-software/cygnus-cli"
+
+_EDITOR_BINARIES = {
+    "vscode":   ["code", "code-insiders"],
+    "code":     ["code", "code-insiders"],
+    "cursor":   ["cursor"],
+    "codium":   ["codium", "vscodium"],
+    "vscodium": ["codium", "vscodium"],
+}
+
+
+def _find_editor_binary(editor: str):
+    """Locate the editor's `code`-style CLI on $PATH."""
+    import shutil
+    for candidate in _EDITOR_BINARIES.get(editor, []):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def _resolve_latest_vsix_url():
+    """Find the most recent .vsix asset on the cygnus-cli release page.
+
+    Returns None on any failure so the caller can surface a clean error.
+    Anonymous GitHub API access (rate-limited but fine for once-per-install).
+    """
+    api = f"https://api.github.com/repos/{EXTENSION_RELEASE_REPO}/releases/latest"
+    try:
+        req = urllib.request.Request(api, headers={"User-Agent": "cygnus-cli/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return None
+    for asset in data.get("assets", []) or []:
+        name = asset.get("name", "")
+        if name.endswith(".vsix"):
+            url = asset.get("browser_download_url")
+            if url:
+                return url
+    return None
+
+
+def cmd_extension(args):
+    """Dispatch `cygnus extension <subcommand>`."""
+    sub = getattr(args, "extension_command", None)
+    if sub == "install":
+        cmd_extension_install(args)
+    else:
+        print("Usage: cygnus extension install [vscode|cursor|codium] [options]")
+        print()
+        print("  Distributes the Cygnus editor extension without the Microsoft")
+        print("  Marketplace. Pulls the latest .vsix from the cygnus-cli release")
+        print("  page on GitHub and invokes the editor's --install-extension flag.")
+
+
+def cmd_extension_install(args):
+    """Download + install the Cygnus VS Code extension into the chosen editor."""
+    import subprocess
+    import tempfile
+
+    editor = getattr(args, "editor", "vscode") or "vscode"
+    binary = _find_editor_binary(editor)
+    if not binary:
+        candidates = ", ".join(_EDITOR_BINARIES.get(editor, []))
+        print(
+            f"  Error: could not find a {editor} CLI on $PATH "
+            f"(looked for: {candidates}).",
+            file=sys.stderr,
+        )
+        print(
+            "  Open VS Code → command palette → "
+            "'Shell Command: Install code command in PATH'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    vsix_local = getattr(args, "vsix_file", None)
+    if vsix_local:
+        if not Path(vsix_local).is_file():
+            print(f"  Error: {vsix_local} not found.", file=sys.stderr)
+            sys.exit(1)
+        target = vsix_local
+    else:
+        vsix_url = getattr(args, "vsix_url", None) or _resolve_latest_vsix_url()
+        if not vsix_url:
+            print(
+                "  Error: could not find a .vsix asset on the latest "
+                f"{EXTENSION_RELEASE_REPO} release.",
+                file=sys.stderr,
+            )
+            print(
+                "  Workaround: download manually + use --vsix-file. "
+                "Or open an issue with `cygnus issue`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"  Downloading {vsix_url}...")
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="cygnus-", suffix=".vsix", delete=False,
+            ) as tmp:
+                req = urllib.request.Request(
+                    vsix_url, headers={"User-Agent": "cygnus-cli/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    tmp.write(resp.read())
+                target = tmp.name
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"  Error downloading {vsix_url}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"  Installing into {editor} via {binary}...")
+    try:
+        subprocess.run(
+            [binary, "--install-extension", target, "--force"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(
+            f"  Error: {binary} --install-extension returned exit {e.returncode}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"  Error: {binary} not executable (was found on $PATH).",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print()
+    print("  ✓ Cygnus extension installed.")
+    if API_KEY:
+        print("  ✓ Existing API key in ~/.cygnus/config.json will be picked up "
+              "automatically.")
+    else:
+        print("  Run `cygnus login` to authenticate (or leave blank for the "
+              "free tier — 100 lookups/day).")
+    print("  Restart your editor to activate.")
+
+
+def cmd_help(args):
+    """Print the full command list grouped by purpose.
+
+    `cygnus -h` / `--help` give argparse's terse alphabetical listing
+    of every subcommand. `cygnus help` adds the per-group structure a
+    new user actually wants — what to run first, what to reach for
+    when locked out, what's CI-only, etc.
+
+    Sections: Account / Verification / Billing / Tools / Global flags.
+    Adjust group membership when subcommands are added or renamed so
+    the next new user finds them in the right place.
+
+    Pinned by tests/test_cli.py::TestCmdHelpGroupedScreen.
+    """
+    print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
+    sections = [
+        ("Account", [
+            ("signup",     "Create an account (free; pay-as-you-go optional)"),
+            ("login",      "Authenticate with an existing API key"),
+            ("status",     "Show current key fingerprint + tier + balance"),
+            ("logout",     "Clear stored credentials  [confirms]"),
+            ("forgotkey",  "Email a one-time token to rotate your key"),
+            ("userkey",    "Consume an emailed token — rotates + stores the new key  [confirms]"),
+            ("cancel",     "Cancel subscription (account stays on free tier)  [confirms]"),
+            ("uninstall",  "Cancel subscription + remove ALL local data  [confirms]"),
+        ]),
+        ("Verification (main loop)", [
+            ("verify",     "Verify one library or every dep in your lockfile"),
+            ("request",    "Explicitly enqueue a library for full verification"),
+            ("install",    "Download a pre-compiled, signed artifact"),
+            ("list",       "Show installed Cygnus artifacts vs native"),
+            ("check",      "Check for updates + CVEs"),
+            ("lock",       "Generate/refresh cygnus.lock"),
+            ("sbom",       "Export CycloneDX SBOM"),
+        ]),
+        ("Billing", [
+            ("account",    "Show balance + recent charges (verified tier)"),
+            ("deposit",    "Open Stripe Checkout to deposit USD into balance"),
+        ]),
+        ("Tools", [
+            ("init",       "Set up ~/.cygnus/ and configure resolution"),
+            ("cache",      "Manage local response cache (clear / status)"),
+            ("extension",  "Install editor extensions (VS Code / Cursor / VSCodium)"),
+            ("issue",      "File a bug report or feature request"),
+            ("help",       "This screen"),
+        ]),
+        ("Global flags", [
+            ("--ecosystem, -e", "Override auto-detected ecosystem"),
+            ("--no-cache",      "Bypass local cache (always hit API)"),
+        ]),
+    ]
+    for title, entries in sections:
+        print(f"  {title}")
+        for cmd, desc in entries:
+            print(f"    {cmd:<16}  {desc}")
+        print()
+    print("Per-command flags: cygnus <command> --help")
+    print("Source: https://github.com/blackswan-software/cygnus-cli")
+
+
 def cmd_install(args):
     """Download compiled artifact from registry to ~/.cygnus/."""
     _check_tos()
@@ -865,7 +1121,8 @@ def cmd_install(args):
 
     # Prompt signup if no API key (first-time user)
     if not API_KEY and not ci_mode:
-        print("  Tip: Run 'cygnus signup' for a free account")
+        print("  Tip: Run 'cygnus auth signup' for a free account (5 libs/day)")
+        print("       Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription)")
         print()
 
     print(f"cygnus install {ecosystem}/{library}@{version}")
@@ -1310,24 +1567,8 @@ def cmd_verify(args):
         if from_lock:
             deps = _parse_cygnus_lock()
             if not deps:
-                # Offer to generate the lock now instead of failing dead.
-                # --auto-lock (or CYGNUS_AUTO_LOCK=1) skips the prompt for CI.
-                auto = bool(getattr(args, "auto_lock", False)) or os.environ.get("CYGNUS_AUTO_LOCK") == "1"
-                if not auto:
-                    try:
-                        prompt = input("  No cygnus.lock found. Generate one now? [Y/n] ").strip().lower()
-                    except (KeyboardInterrupt, EOFError):
-                        print("\n  Cancelled.", file=sys.stderr)
-                        sys.exit(1)
-                    if prompt in ("n", "no"):
-                        print("  Skipped. Run `cygnus lock` to generate, then retry verify.")
-                        return
-                print("  Generating cygnus.lock first...\n")
-                cmd_lock(args)
-                deps = _parse_cygnus_lock()
-                if not deps:
-                    print("  cygnus lock did not produce a usable manifest. Run `cygnus lock` manually + retry.")
-                    sys.exit(1)
+                print("  No cygnus.lock found. Run 'cygnus lock' first.")
+                return
             _verify_project(ecosystem, deps, ci_mode)
         else:
             # Multi-ecosystem: if no explicit --ecosystem, detect all and verify each
@@ -1681,15 +1922,6 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     print(f"  {'─' * 40}")
     print(f"  Confidence:  {confidence} {grade}")
     print(f"  Tokens:      {token_count} verified function signatures" if token_count else "  Tokens:      not extracted yet")
-    # 2026-06-05: when a lib is in the corpus but at a low grade, the
-    # previous output gave the user no next action. Surface the
-    # `cygnus request` hint so the path to FULLY_VERIFIED is obvious.
-    # Skip the hint at FULLY_VERIFIED (already done) and at
-    # SECURITY_ISSUE_DETECTED (different problem — fix the lib, don't
-    # re-queue it).
-    _hint_low_confidence = confidence not in (
-        "FULLY_VERIFIED", "SECURITY_ISSUE_DETECTED", "RATE_LIMITED",
-    )
     if functions:
         print(f"  Functions:   {', '.join(functions[:5])}")
         if len(functions) > 5:
@@ -1738,12 +1970,6 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     if badge_url:
         print(f"  Badge:       {REGISTRY_URL}{badge_url}")
     print(f"  SBOM:        {REGISTRY_URL}{data.get('sbom_url', '')}")
-    if _hint_low_confidence:
-        # Surface the next action — `cygnus request` enqueues an explicit
-        # verification cycle so the user has a path to FULLY_VERIFIED
-        # instead of staring at ATTESTATION_ONLY.
-        print()
-        print(f"  → cygnus request {library}  # enqueue full verification (1–5 min)")
     print()
 
     return {
@@ -2055,11 +2281,9 @@ def _parse_lockfile(ecosystem: str) -> list[str]:
 
     elif ecosystem == "cpp":
         # 2026-06-05: cpp parse-lockfile branch was missing entirely. The
-        # ecosystem was listed in the detection table at line 324, but
-        # without this branch _parse_lockfile returned [] and the user
-        # saw "No lockfile found" in any C++ project. Reported by a
-        # fresh-user run ("Step 3 scan: per-lib verify/CVE works (keyless);
-        # no project-wide C++ scan").
+        # ecosystem was listed in the detection table but without this
+        # branch _parse_lockfile returned [] and the user saw "No lockfile
+        # found" in any C++ project.
         #
         # Priority: vcpkg.json > conanfile.txt > conanfile.py > CMakeLists.txt.
         # vcpkg.json is the cleanest (structured JSON); the others are
@@ -2107,7 +2331,6 @@ def _parse_lockfile(ecosystem: str) -> list[str]:
         if conan_py.exists():
             try:
                 text = conan_py.read_text()
-                # Match: requires = "name/ver", self.requires("name/ver")
                 for m in re.finditer(r'["\']([a-z0-9_-]+)/([0-9][^"\'@]*)', text):
                     name, ver = m.group(1), m.group(2)
                     deps.append(name)
@@ -2119,10 +2342,8 @@ def _parse_lockfile(ecosystem: str) -> list[str]:
         if cmakelists.exists():
             try:
                 text = cmakelists.read_text()
-                # Match: find_package(NAME ...) — coarse but useful
                 for m in re.finditer(r'find_package\s*\(\s*([A-Za-z_][A-Za-z0-9_]+)', text):
                     name = m.group(1)
-                    # Skip CMake built-ins that aren't real libraries.
                     if name in {"Threads", "PkgConfig", "Git", "Python",
                                  "Python3", "Python2", "Doxygen"}:
                         continue
@@ -2360,7 +2581,7 @@ def cmd_auth_signup(args):
 
     Usage:
       cygnus auth signup                      # free tier (any email)
-      cygnus auth signup --tier verified      # pay-as-you-go (deposit required, see website)
+      cygnus auth signup --tier verified      # pay-as-you-go ($10 min deposit)
       cygnus auth signup --tier enterprise    # enterprise (corporate email required)
     """
     tier_choice = getattr(args, "tier", "free") or "free"
@@ -2462,8 +2683,8 @@ def cmd_auth_login(args):
 
     # Validate against the auth service
     req = urllib.request.Request(f"{REGISTRY_URL}/auth/validate")
-    req.add_header("X-Api-Key", key)
     req.add_header("User-Agent", "cygnus-cli/1.0")
+    req.add_header("X-Api-Key", key)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
@@ -2480,19 +2701,11 @@ def cmd_auth_login(args):
     cfg = _load_config()
     cfg["api_key"] = key
     cfg["tier"] = data.get("tier", "unknown")
-    # 2026-06-06: cache email server-side returned from /auth/validate.
-    # `cygnus auth signup` already saves email; now login matches, so
-    # `cygnus forgot-key` can pre-fill instead of prompting every time.
-    email_from_server = data.get("email")
-    if email_from_server:
-        cfg["email"] = email_from_server
     _save_config(cfg)
 
     tier_name = data.get("tier_name") or data.get("tier", "unknown").upper()
     fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
     print(f"  Authenticated. Tier: {tier_name}  Key: ...{fingerprint}")
-    if email_from_server:
-        print(f"  Email: {email_from_server}")
     print(f"  Credentials stored in {CONFIG_FILE}")
 
 
@@ -2608,7 +2821,7 @@ def cmd_auth_cancel(args):
         return
 
     print("  This will cancel your paid subscription.")
-    print("  Your account stays active on the free tier.")
+    print("  Your account stays active on the free tier (5 libs/day).")
     print("  Your API key continues to work.")
     confirm = input("  Cancel subscription? [y/N]: ").strip().lower()
     if confirm != "y":
@@ -2628,7 +2841,7 @@ def cmd_auth_cancel(args):
         print(f"  Tier: {data.get('new_tier', 'free').upper()}")
         if data.get("active_until"):
             print(f"  Active until: {data['active_until'][:10]} (paid period ends)")
-        print(f"\n  Your API key still works for free tier.")
+        print(f"\n  Your API key still works for free tier (5 libs/day).")
         print(f"  To reactivate: run `cygnus deposit <USD>` to add credit.")
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -2661,13 +2874,6 @@ def cmd_account(args):
 
     try:
         import urllib.request, urllib.error, json as _json
-        req = urllib.request.Request(
-            f"{REGISTRY_URL.replace(':8001', ':8007')}/auth/billing/balance"
-            if ":8001" in REGISTRY_URL
-            else f"{REGISTRY_URL}/auth/billing/balance",
-            headers=headers,
-        )
-        # Easier: hit auth.blackswan-software.ai directly
         auth_url = os.environ.get("CYGNUS_AUTH_URL", "https://auth.blackswan-software.ai")
         req = urllib.request.Request(f"{auth_url}/auth/billing/balance", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -2707,133 +2913,17 @@ def cmd_account(args):
         print(f"  Or run:  cygnus account --json (to script via API)")
 
 
-def cmd_deposit(args):
-    """Open Stripe Checkout in the browser to deposit USD into your account balance.
-
-    Card entry happens on Stripe's hosted page (PCI-compliant) — the CLI never
-    sees the card data. After payment, Stripe redirects to a confirmation
-    page; this command polls /auth/billing/balance to surface the new total.
-
-    Usage:
-      cygnus deposit <USD>          # minimum $10, maximum $1000 per deposit
-      cygnus deposit 50 --no-open   # don't auto-open browser; print URL only
-    """
-    amount_usd = int(getattr(args, "amount", 0) or 0)
-    if amount_usd < 10:
-        print("  Error: deposit below minimum ($10).", file=sys.stderr)
-        sys.exit(1)
-    if amount_usd > 1000:
-        print(f"  Error: deposit exceeds maximum ($1000 per transaction).", file=sys.stderr)
-        print(f"  Multiple deposits work, or contact support@blackswan-software.ai for Enterprise.", file=sys.stderr)
-        sys.exit(1)
-    amount_cents = amount_usd * 100
-
-    api_key = os.environ.get("CYGNUS_API_KEY", "") or _load_config().get("api_key", "")
-    if not api_key:
-        print("  Error: not authenticated. Run `cygnus auth signup` or `cygnus auth login`.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    return_url = "https://blackswan-software.ai/deposit/success"
-    body = {"amount_cents": amount_cents, "return_url": return_url}
-    payload = json.dumps(body).encode()
-    req = urllib.request.Request(
-        f"{REGISTRY_URL}/auth/billing/checkout",
-        data=payload, method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Api-Key": api_key,
-            "User-Agent": "cygnus-cli/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body_b = e.read().decode() if e.fp else ""
-        try:
-            detail = json.loads(body_b).get("detail", e.reason)
-        except Exception:
-            detail = e.reason
-        print(f"  Error: {detail}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"  Connection error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    mode = data.get("mode", "live")
-    checkout_url = data.get("checkout_url", "")
-    if mode == "stub" or not checkout_url:
-        print(f"  Stripe is not enabled on the server (mode={mode}).")
-        print(f"  Deposit temporarily unavailable. Contact support@blackswan-software.ai if this persists.")
-        sys.exit(1)
-
-    no_open = bool(getattr(args, "no_open", False))
-    print(f"  Opening Stripe Checkout for ${amount_usd:.2f}...")
-    print(f"  URL: {checkout_url}")
-
-    if not no_open:
-        opened = False
-        for opener in ("xdg-open", "open", "start"):  # linux, macOS, windows
-            try:
-                import subprocess  # local import; standard library
-                subprocess.Popen([opener, checkout_url],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                opened = True
-                break
-            except FileNotFoundError:
-                continue
-            except Exception:
-                continue
-        if not opened:
-            print("  (Could not auto-open browser — paste the URL above manually.)")
-
-    print()
-    print("  Complete payment in the browser, then return here.")
-    print("  Polling /auth/billing/balance for the new balance (Ctrl-C to stop)...")
-    print()
-
-    # Poll for up to 5 minutes
-    import time
-    deadline = time.time() + 300
-    initial_balance = None
-    while time.time() < deadline:
-        req = urllib.request.Request(
-            f"{REGISTRY_URL}/auth/billing/balance",
-            headers={"X-Api-Key": api_key},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                bal = json.loads(resp.read())
-            cents = int(bal.get("balance_cents", 0))
-            if initial_balance is None:
-                initial_balance = cents
-                print(f"  Initial balance: ${initial_balance / 100:.2f}")
-            elif cents > initial_balance:
-                print(f"\n  ✓ Deposit received. New balance: ${cents / 100:.2f}")
-                return
-            else:
-                print(f"    balance: ${cents / 100:.2f}  (waiting for webhook...)", end="\r", flush=True)
-        except Exception:
-            pass
-        time.sleep(5)
-    print()
-    print("  Polling timed out after 5 minutes. The webhook may still be in flight.")
-    print("  Check balance later with: cygnus account")
-
-
 def cmd_auth_forgot_key(args):
     """Request a one-time email token to rotate the API key.
 
     Usage:
-      cygnus forgot-key                       # uses email from ~/.cygnus/config.json
-      cygnus forgot-key --email me@x.com      # explicit override
+      cygnus forgotkey                            # uses cached email
+      cygnus forgotkey --email me@x.com           # explicit override
 
-    2026-06-06: pre-fill email from ~/.cygnus/config.json when present.
-    Both signup and login now cache the email there, so the only time we
-    fall back to prompting is when the user has no config at all (first
-    run on a new machine, OR config was wiped). Surfaced by operator —
-    "CLI shouldn't ask for email it should know email".
+    Pre-fills email from ~/.cygnus/config.json when present. Both
+    signup and login cache the email there, so the only time we
+    prompt is when the user has no config at all (first run on a
+    new machine, OR config was wiped).
     """
     explicit_email = getattr(args, "email", None)
     cfg = _load_config()
@@ -2862,61 +2952,49 @@ def cmd_auth_forgot_key(args):
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            json.loads(resp.read())  # response is generic — don't reveal whether email is registered
+            json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        # BUG 2 fix (2026-06-06): graceful 403/429/connection error
+        # handling. The Cloudflare WAF can return 403 on perfectly-
+        # formed POSTs (UA fingerprinting, IP deny-list, etc.) — a
+        # one-word "Forbidden" is a dead end for the user. Surface
+        # the support@ recovery path explicitly.
+        if e.code in (403, 429):
+            print(f"  Recovery email request was blocked at the edge "
+                  f"(HTTP {e.code}).", file=sys.stderr)
+            print(f"  This is usually a WAF / rate-limit / proxy issue, "
+                  f"not your fault.", file=sys.stderr)
+            print(f"  Email support@blackswan-software.ai with the "
+                  f"address you signed up with;", file=sys.stderr)
+            print(f"  we'll send the reset link directly.",
+                  file=sys.stderr)
+            sys.exit(1)
         body = e.read().decode() if e.fp else ""
         try:
             detail = json.loads(body).get("detail", e.reason)
         except Exception:
             detail = e.reason
-        # 2026-06-05: a fresh-user run reported `Error: Forbidden` (HTTP 403)
-        # as a DEAD END. The auth-service handler itself only returns 400 /
-        # 429 / 200 — never 403 — so any 403 the user sees must come from
-        # the wire (Cloudflare WAF, an intermediate proxy, or aggressive
-        # rate-limit shield). Whatever the source, the CLI's job is to give
-        # the user a path forward instead of a one-word error.
-        if e.code == 403:
-            print()
-            print("  We can't reach the password-reset endpoint from this", file=sys.stderr)
-            print("  network (HTTP 403). This is usually one of:", file=sys.stderr)
-            print("    • A WAF / corporate proxy blocking the POST", file=sys.stderr)
-            print("    • Rate-limit shield (try again in a few minutes)", file=sys.stderr)
-            print("    • Your IP is on a Cloudflare deny-list", file=sys.stderr)
-            print(file=sys.stderr)
-            print("  Recover your key by emailing:", file=sys.stderr)
-            print("    support@blackswan-software.ai", file=sys.stderr)
-            print("  Include the email you signed up with — we'll send a", file=sys.stderr)
-            print("  one-time reset token within 1 business day.", file=sys.stderr)
-            sys.exit(1)
-        if e.code == 429:
-            print(file=sys.stderr)
-            print("  Rate-limited. Too many reset attempts from this IP /", file=sys.stderr)
-            print("  email recently. Wait ~1 hour and retry, or email", file=sys.stderr)
-            print("  support@blackswan-software.ai for a manual reset.", file=sys.stderr)
-            sys.exit(1)
         print(f"  Error: {detail}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"  Connection error: {e}", file=sys.stderr)
-        print(f"  If this persists, email support@blackswan-software.ai", file=sys.stderr)
         sys.exit(1)
 
     print("  ✓ If that email is registered, a reset token has been sent.")
     print("  Check your inbox, then run:")
-    print("    cygnus user-key <TOKEN>")
+    print("    cygnus auth reset-key <TOKEN>")
 
 
 def cmd_auth_reset_key(args):
     """Consume a one-time email token, rotate the API key, store the new key locally.
 
     Usage:
-      cygnus user-key <TOKEN>
+      cygnus auth reset-key <TOKEN>
     """
-    token = getattr(args, "token", None) or ""
-    token = token.strip()
+    token = (getattr(args, "token", None) or "").strip()
     if not token:
         print("  Error: token required.", file=sys.stderr)
-        print("  Run `cygnus forgotkey` first to receive a token by email.", file=sys.stderr)
+        print("  Run `cygnus auth forgot-key` first to receive a token by email.", file=sys.stderr)
         sys.exit(1)
 
     print("  This will rotate your Cygnus API key. The current key will stop working.")
@@ -2926,7 +3004,6 @@ def cmd_auth_reset_key(args):
         print("  Cancelled. Token NOT consumed — run again when ready.")
         sys.exit(0)
 
-    # POST /auth/reset-key/{token} — server side rotates by key_hash + returns the new raw key
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/reset-key/{token}",
         data=b"", method="POST",
@@ -2943,7 +3020,7 @@ def cmd_auth_reset_key(args):
             detail = e.reason
         if e.code == 400:
             print(f"  Error: {detail}", file=sys.stderr)
-            print("  Tokens expire — request a fresh one with `cygnus forgot-key`.", file=sys.stderr)
+            print("  Tokens expire — request a fresh one with `cygnus auth forgot-key`.", file=sys.stderr)
         elif e.code == 404:
             print(f"  Error: {detail}", file=sys.stderr)
         else:
@@ -2960,7 +3037,6 @@ def cmd_auth_reset_key(args):
 
     cfg = _load_config()
     cfg["api_key"] = new_key
-    # tier may have changed (unlikely but cheap to refresh — leave existing if not returned)
     if data.get("tier"):
         cfg["tier"] = data["tier"]
     if data.get("email"):
@@ -2986,25 +3062,18 @@ def cmd_auth(args):
     elif subcmd == "cancel":
         cmd_auth_cancel(args)
     elif subcmd == "forgot-key":
-        # 2026-06-06: nudge users to the new top-level command; still
-        # works so existing scripts don't break.
-        print("  (Tip: `cygnus forgot-key` is the new top-level form.)")
         cmd_auth_forgot_key(args)
     elif subcmd == "reset-key":
-        # 2026-06-06: replaced by top-level `cygnus user-key`. Still
-        # works; just nudges users to the new name.
-        print("  (Tip: `cygnus user-key <TOKEN>` is the new top-level form.)")
         cmd_auth_reset_key(args)
     else:
-        print("Usage: cygnus auth <signup|login|status|logout|cancel>")
-        print("Recovery moved to top-level: `cygnus forgot-key` + `cygnus user-key <TOKEN>`")
-        print("  signup       — create account (free; pay-as-you-go available)")
+        print("Usage: cygnus auth <signup|login|status|logout|cancel|forgot-key|reset-key>")
+        print("  signup       — create account (free or $10 deposit pay-as-you-go)")
         print("  login        — authenticate with existing API key")
         print("  status       — show current auth state + balance")
         print("  logout       — clear stored credentials")
         print("  cancel       — cancel subscription (keep account)")
-        print("  forgot-key   — email yourself a one-time token to rotate the key")
-        print("  reset-key    — consume the token and store the new key locally")
+        print("  forgot-key   — request reset email if you lost your key")
+        print("  reset-key    — consume an email token and rotate to a new key")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -3081,10 +3150,10 @@ def _first_run_onboarding():
         print("    cygnus verify               Scan this project's dependencies")
         print("    cygnus verify <library>      Check a specific library")
         print("    cygnus check                 Scan for known CVEs")
-        print("    cygnus auth signup           Create account (free)")
+        print("    cygnus auth signup           Create account (free, 5 libs/day)")
         print()
-        print("  Free: grade + CVE per the documented daily quota. No payment required.")
-        print("  Need more? `cygnus signup` then `cygnus deposit <USD>` (pay-as-you-go).")
+        print("  Free: grade + CVE for 5 libs/day. No payment required.")
+        print("  Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription).")
 
     else:
         # Returning user
@@ -3167,15 +3236,12 @@ def cmd_issue(args):
       1. Try `gh issue create` (if user has gh CLI) — best UX
       2. Fallback: print a github.com URL with the body pre-filled
     """
-    # 2026-06-05: `subprocess` is used at lines 2956 ($EDITOR launch) and
-    # 2984 (gh issue create) — both inside this function — but was never
-    # imported at module scope OR inside this function. When the caller
-    # supplied --body (skipping the editor block) execution went straight
-    # to the gh call and crashed with NameError. Surfaced by a fresh-user
-    # run as "Step 4 ... issue fallback crashes". Import here so both
-    # subprocess paths work.
-    import subprocess
     import platform
+    import subprocess  # BUG 5 (2026-06-06): module-level subprocess
+                       # import was removed in an earlier refactor;
+                       # cmd_issue's $EDITOR + gh fallback paths use
+                       # subprocess.run/SubprocessError. Without this
+                       # import the function NameError'd on every call.
     import urllib.parse
 
     email = _get_user_email()
@@ -3264,164 +3330,11 @@ def cmd_issue(args):
     print(f"  Thank you, {name}. We read every report.")
 
 
-# ── Editor extensions ─────────────────────────────────────────────────────
-# The Cygnus VS Code extension is shipped from the cygnus-cli GitHub
-# release page (no Microsoft Marketplace / Open VSX dependency). The
-# distribution flow is:
-#
-#   cygnus extension install vscode
-#     → resolves latest .vsix URL from GitHub releases
-#     → downloads to /tmp
-#     → shells out to `code --install-extension /tmp/cygnus-<ver>.vsix`
-#
-# Editor binary discovery handles VS Code (`code`), Cursor (`cursor`),
-# VSCodium (`codium`) and Insiders (`code-insiders`). The extension
-# itself reads ~/.cygnus/config.json on activation so a user only ever
-# pastes their API key once (via `cygnus auth login`).
-EXTENSION_RELEASE_REPO = "blackswan-software/cygnus-cli"
-
-_EDITOR_BINARIES = {
-    "vscode":   ["code", "code-insiders"],
-    "code":     ["code", "code-insiders"],
-    "cursor":   ["cursor"],
-    "codium":   ["codium", "vscodium"],
-    "vscodium": ["codium", "vscodium"],
-}
-
-
-def _find_editor_binary(editor: str) -> str | None:
-    """Locate the editor's `code`-style CLI on $PATH."""
-    import shutil
-    for candidate in _EDITOR_BINARIES.get(editor, []):
-        path = shutil.which(candidate)
-        if path:
-            return path
-    return None
-
-
-def _resolve_latest_vsix_url() -> str | None:
-    """Find the most recent .vsix asset on the cygnus-cli release page.
-
-    Returns None on any failure so the caller can surface a clean error
-    message. We deliberately do NOT inject the GH token from the
-    environment — anonymous access is rate-limited but works for the
-    once-per-install use case.
-    """
-    api = f"https://api.github.com/repos/{EXTENSION_RELEASE_REPO}/releases/latest"
-    try:
-        req = urllib.request.Request(api, headers={"User-Agent": "cygnus-cli/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return None
-    for asset in data.get("assets", []) or []:
-        name = asset.get("name", "")
-        if name.endswith(".vsix"):
-            url = asset.get("browser_download_url")
-            if url:
-                return url
-    return None
-
-
-def cmd_extension(args):
-    """Dispatch `cygnus extension <subcommand>`."""
-    sub = getattr(args, "extension_command", None)
-    if sub == "install":
-        cmd_extension_install(args)
-    else:
-        print("Usage: cygnus extension install [vscode|cursor|codium] [options]")
-        print()
-        print("  Distributes the Cygnus editor extension without the Microsoft")
-        print("  Marketplace. Pulls the latest .vsix from the cygnus-cli release")
-        print("  page on GitHub and invokes the editor's --install-extension flag.")
-
-
-def cmd_extension_install(args):
-    """Download + install the Cygnus VS Code extension into the chosen editor."""
-    import subprocess
-    import tempfile
-
-    editor = getattr(args, "editor", "vscode") or "vscode"
-    binary = _find_editor_binary(editor)
-    if not binary:
-        candidates = ", ".join(_EDITOR_BINARIES.get(editor, []))
-        print(
-            f"  Error: could not find a {editor} CLI on $PATH "
-            f"(looked for: {candidates}).",
-            file=sys.stderr,
-        )
-        print(
-            "  Open VS Code → command palette → "
-            "'Shell Command: Install code command in PATH'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Local .vsix wins (lets you smoke-test before a release).
-    vsix_local = getattr(args, "vsix_file", None)
-    if vsix_local:
-        if not Path(vsix_local).is_file():
-            print(f"  Error: {vsix_local} not found.", file=sys.stderr)
-            sys.exit(1)
-        target = vsix_local
-    else:
-        vsix_url = getattr(args, "vsix_url", None) or _resolve_latest_vsix_url()
-        if not vsix_url:
-            print(
-                "  Error: could not find a .vsix asset on the latest "
-                f"{EXTENSION_RELEASE_REPO} release.",
-                file=sys.stderr,
-            )
-            print(
-                "  Workaround: download manually + use --vsix-file. "
-                "Or open an issue with `cygnus issue`.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print(f"  Downloading {vsix_url}...")
-        try:
-            with tempfile.NamedTemporaryFile(
-                prefix="cygnus-", suffix=".vsix", delete=False,
-            ) as tmp:
-                req = urllib.request.Request(
-                    vsix_url, headers={"User-Agent": "cygnus-cli/1.0"},
-                )
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    tmp.write(resp.read())
-                target = tmp.name
-        except (urllib.error.URLError, urllib.error.HTTPError) as e:
-            print(f"  Error downloading {vsix_url}: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    print(f"  Installing into {editor} via {binary}...")
-    try:
-        subprocess.run(
-            [binary, "--install-extension", target, "--force"],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(
-            f"  Error: {binary} --install-extension returned exit {e.returncode}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    except FileNotFoundError:
-        print(f"  Error: {binary} not executable (was found on $PATH).",
-              file=sys.stderr)
-        sys.exit(1)
-
-    print()
-    print("  ✓ Cygnus extension installed.")
-    if API_KEY:
-        print("  ✓ Existing API key in ~/.cygnus/config.json will be picked up "
-              "automatically.")
-    else:
-        print("  Run `cygnus auth login` to authenticate (or leave blank for the "
-              "free tier — 100 lookups/day).")
-    print("  Restart your editor to activate.")
-
-
 def main():
+    parser = argparse.ArgumentParser(
+        prog="cygnus",
+        description="Pre-compiled artifacts alongside your package manager.",
+    )
     # `__version__` is set in cygnus/__init__.py and shipped in every
     # release. Falling back to "unknown" lets test environments that
     # import cli.py without a built package still register the flag.
@@ -3429,18 +3342,9 @@ def main():
         from . import __version__ as _cli_version
     except Exception:
         _cli_version = "unknown"
-
-    parser = argparse.ArgumentParser(
-        prog="cygnus",
-        description="Pre-compiled artifacts alongside your package manager.",
-    )
-    # 2026-06-05: `cygnus --version` previously argparse-errored because the
-    # flag was never registered, even though __version__ exists in the
-    # package. Surfaced by a fresh-user run as "Step 1 install: present,
-    # but cygnus --version errors (can't tell what I have)". Registering
-    # here so users can sanity-check their install in one keystroke.
     parser.add_argument("--version", "-V", action="version",
-                        version=f"cygnus {_cli_version}")
+                        version=f"cygnus {_cli_version}",
+                        help="Print the CLI version and exit")
     parser.add_argument("--ecosystem", "-e", default=None,
                         help="Ecosystem (default: auto-detect, or python)")
     parser.add_argument("--no-cache", action="store_true",
@@ -3479,19 +3383,14 @@ def main():
     p_verify.add_argument("--check-signature", action="store_true", help="Verify Ed25519 signature against published keys")
     p_verify.add_argument("--cve", action="store_true", help="Show known CVEs/security advisories for this version")
     p_verify.add_argument("--from-lock", action="store_true", help="Verify from cygnus.lock (no native lockfile needed)")
-    p_verify.add_argument("--auto-lock", action="store_true", help="With --from-lock: auto-generate cygnus.lock if missing (no prompt). CI-friendly. CYGNUS_AUTO_LOCK=1 env var also works.")
 
-    # 2026-06-06: auth commands flattened to top-level. The operator
-    # called the nested `cygnus auth login` / `cygnus auth signup` /
-    # etc. "stupid double commands" — auth IS the product, not a
-    # sub-namespace. Same single-word, no-dash convention as
-    # `cygnus verify` / `cygnus install` / `cygnus check` etc.
-    #
-    # forgot-key → forgotkey      (one word, no dash)
-    # reset-key → userkey         (CLI does the reset; user supplies the token)
+    # Account lifecycle — flat top-level commands (2026-06-06 flatten).
+    # The nested `cygnus auth X` namespace was removed in favor of
+    # discoverable top-level cmds. Renamed `forgot-key`/`reset-key`
+    # → `forgotkey`/`userkey` to drop the dashes per operator decision.
     p_signup = sub.add_parser("signup", help="Create an account (free or pay-as-you-go)")
     p_signup.add_argument("--tier", choices=["free", "verified", "enterprise"], default="free",
-                          help="Account tier (verified=pay-as-you-go, enterprise=contact us)")
+                          help="Account tier (verified=$10 deposit pay-as-you-go, enterprise=contact us)")
     sub.add_parser("login", help="Authenticate with your Cygnus API key")
     sub.add_parser("status", help="Show current auth state, tier, and key fingerprint")
     sub.add_parser("logout", help="Clear stored credentials")
@@ -3508,7 +3407,7 @@ def main():
     )
     p_userkey.add_argument("token", help="The one-time token from the reset email")
 
-    sub.add_parser("help", help="Show the full command list with descriptions")
+    sub.add_parser("help", help="Show the full command list grouped by purpose (not argparse's terse alphabetical view)")
 
     sub.add_parser("uninstall", help="Uninstall Cygnus — cancel subscription + remove all data")
 
@@ -3522,29 +3421,10 @@ def main():
                            help="Test mode: shows balance from stub endpoints (no real charges)")
     p_account.add_argument("--json", action="store_true", help="JSON output")
 
-    p_deposit = sub.add_parser("deposit",
-                               help="Add funds to your account via Stripe Checkout (opens browser)")
-    p_deposit.add_argument("amount", type=int, metavar="USD",
-                           help="Amount in USD (minimum $10, maximum $1000 per deposit)")
-    p_deposit.add_argument("--no-open", action="store_true",
-                           help="Don't auto-open the browser; print the checkout URL only")
-
-    p_issue = sub.add_parser(
-        "issue",
-        help="File a bug report or feature request — we read every one",
-    )
-    p_issue.add_argument("title", nargs="?", default=None,
-                         help="One-line title (prompts if missing)")
-    p_issue.add_argument("--body", default=None,
-                         help="Issue body (opens $EDITOR if not provided)")
-
     # `cygnus request <library>` — explicit verification request. `verify`
     # already auto-queues when a lib isn't in the corpus, but for users
-    # whose lib IS in the corpus at a lower confidence (ATTESTATION_ONLY,
-    # ALL_OK, etc.) the auto-queue path doesn't run. `request` always
-    # enqueues, gives clear feedback, and bypasses the "I see ATTESTATION_
-    # ONLY and don't know what to do" dead-end surfaced in the 2026-06-05
-    # fresh-user report.
+    # whose lib IS in the corpus at a lower confidence the auto-queue
+    # path doesn't run. `request` always enqueues with clear feedback.
     p_request = sub.add_parser(
         "request",
         help="Request verification for a library — auto-queues compilation + token extraction",
@@ -3554,13 +3434,18 @@ def main():
     p_request.add_argument("version", nargs="?", default="latest",
                            help="Version (default: latest)")
 
-    # ── Editor extensions ─────────────────────────────────────────────────
+    # `cygnus deposit <USD>` — Stripe Checkout (PCI-compliant hosted form).
+    p_deposit = sub.add_parser(
+        "deposit",
+        help="Add funds to your account via Stripe Checkout (opens browser)",
+    )
+    p_deposit.add_argument("amount", type=int, metavar="USD",
+                           help="Amount in USD (minimum $10, maximum $1000 per deposit)")
+    p_deposit.add_argument("--no-open", action="store_true",
+                           help="Don't auto-open the browser; print the checkout URL only")
+
     # `cygnus extension install vscode` — distributes the VS Code extension
-    # from the cygnus-cli GitHub releases page without depending on the
-    # Microsoft Marketplace or Open VSX. Users get one-shot install:
-    #   cygnus auth login
-    #   cygnus extension install vscode
-    # and the extension picks up the API key the CLI just wrote.
+    # from the cygnus-cli GitHub releases page (no Marketplace dependency).
     p_extension = sub.add_parser(
         "extension",
         help="Install editor extensions (VS Code / Cursor / VSCodium)",
@@ -3577,13 +3462,21 @@ def main():
     )
     p_ext_install.add_argument(
         "--vsix-url", default=None,
-        help="Override the .vsix download URL (default: latest cygnus-cli "
-             "release on GitHub)",
+        help="Override the .vsix download URL (default: latest cygnus-cli release on GitHub)",
     )
     p_ext_install.add_argument(
         "--vsix-file", default=None,
         help="Install a local .vsix file instead of downloading",
     )
+
+    p_issue = sub.add_parser(
+        "issue",
+        help="File a bug report or feature request — we read every one",
+    )
+    p_issue.add_argument("title", nargs="?", default=None,
+                         help="One-line title (prompts if missing)")
+    p_issue.add_argument("--body", default=None,
+                         help="Issue body (opens $EDITOR if not provided)")
 
     args = parser.parse_args()
 
@@ -3638,16 +3531,16 @@ def main():
         cmd_uninstall(args)
     elif args.command == "account":
         cmd_account(args)
-    elif args.command == "deposit":
-        cmd_deposit(args)
     elif args.command == "issue":
         cmd_issue(args)
-    elif args.command == "extension":
-        cmd_extension(args)
-    elif args.command == "request":
-        cmd_request(args)
     elif args.command == "help":
         cmd_help(args)
+    elif args.command == "request":
+        cmd_request(args)
+    elif args.command == "deposit":
+        cmd_deposit(args)
+    elif args.command == "extension":
+        cmd_extension(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
