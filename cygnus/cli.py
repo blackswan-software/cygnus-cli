@@ -2811,10 +2811,36 @@ def cmd_auth_forgot_key(args):
             detail = json.loads(body).get("detail", e.reason)
         except Exception:
             detail = e.reason
+        # 2026-06-05: a fresh-user run reported `Error: Forbidden` (HTTP 403)
+        # as a DEAD END. The auth-service handler itself only returns 400 /
+        # 429 / 200 — never 403 — so any 403 the user sees must come from
+        # the wire (Cloudflare WAF, an intermediate proxy, or aggressive
+        # rate-limit shield). Whatever the source, the CLI's job is to give
+        # the user a path forward instead of a one-word error.
+        if e.code == 403:
+            print()
+            print("  We can't reach the password-reset endpoint from this", file=sys.stderr)
+            print("  network (HTTP 403). This is usually one of:", file=sys.stderr)
+            print("    • A WAF / corporate proxy blocking the POST", file=sys.stderr)
+            print("    • Rate-limit shield (try again in a few minutes)", file=sys.stderr)
+            print("    • Your IP is on a Cloudflare deny-list", file=sys.stderr)
+            print(file=sys.stderr)
+            print("  Recover your key by emailing:", file=sys.stderr)
+            print("    support@blackswan-software.ai", file=sys.stderr)
+            print("  Include the email you signed up with — we'll send a", file=sys.stderr)
+            print("  one-time reset token within 1 business day.", file=sys.stderr)
+            sys.exit(1)
+        if e.code == 429:
+            print(file=sys.stderr)
+            print("  Rate-limited. Too many reset attempts from this IP /", file=sys.stderr)
+            print("  email recently. Wait ~1 hour and retry, or email", file=sys.stderr)
+            print("  support@blackswan-software.ai for a manual reset.", file=sys.stderr)
+            sys.exit(1)
         print(f"  Error: {detail}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"  Connection error: {e}", file=sys.stderr)
+        print(f"  If this persists, email support@blackswan-software.ai", file=sys.stderr)
         sys.exit(1)
 
     print("  ✓ If that email is registered, a reset token has been sent.")

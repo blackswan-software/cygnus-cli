@@ -159,14 +159,100 @@ class TestCygnusIssueNoCrash:
 
 
 # ── BUG 2 — forgot-key 403 ────────────────────────────────────────────────
-# Not pinnable from CLI tests in isolation. The CLI code path is clean
-# (cmd_auth_forgot_key sends POST with email, surfaces server errors). The
-# 403 reported by the fresh-user run came from somewhere on the wire
-# (Cloudflare WAF is the most plausible — auth-service code on the
-# registry side only returns 400/429/200 for /auth/forgot-key, never 403).
-#
-# Surfaced as a TODO so we revisit if a user reports it again with the
-# exact request id / x-request-id headers.
-@pytest.mark.skip(reason="BUG 2 requires server-side reproduction + headers")
-def test_forgot_key_no_403_under_normal_conditions():
-    pass
+
+class TestForgotKey403:
+    """The user-facing fix for BUG 2 is twofold:
+
+      (A) live integration — the production /auth/forgot-key endpoint
+          must not return 403 for a properly-formed POST. If CI ever
+          hits 403, something on the wire (Cloudflare WAF, proxy, IP
+          deny-list) regressed and we want loud failure here.
+
+      (B) graceful handling — when the CLI DOES see 403, the user
+          must get an actionable next step (email support@), not a
+          dead-end one-word "Error: Forbidden".
+
+    A previous version of this file marked the test @pytest.mark.skip
+    which is the opposite of fixing — it hid the bug instead of pinning
+    a behavior. Removed 2026-06-05.
+    """
+
+    def test_live_endpoint_does_not_return_403(self):
+        """Hit the production /auth/forgot-key with a smoke email; assert
+        the response is not 403. Skipped only when the CLI environment
+        can't reach the public registry (offline CI runner). On a
+        normally-reachable CI runner this is the live regression alarm."""
+        import urllib.request
+        import urllib.error
+
+        # Use the same URL the CLI uses.
+        from cygnus.cli import REGISTRY_URL
+        url = f"{REGISTRY_URL}/auth/forgot-key"
+        payload = json.dumps({"email": "ci-smoke-test@example.invalid"}).encode()
+        req = urllib.request.Request(
+            url, data=payload, method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "cygnus-cli/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except urllib.error.URLError as e:
+            pytest.skip(f"registry unreachable from CI runner: {e}")
+            return
+
+        assert status != 403, (
+            f"/auth/forgot-key returned 403 from the CLI's standard POST. "
+            f"This is the 'dead-end Forbidden' the fresh-user run hit. "
+            f"Investigate Cloudflare WAF / proxy / IP deny-list on the "
+            f"path. Expected: 200 (generic success) or 429 (rate limit)."
+        )
+
+    def test_cli_handles_403_gracefully_not_dead_end(self):
+        """When /auth/forgot-key returns 403, the CLI must print:
+          · the support@ email
+          · a description of why (WAF / rate / deny-list)
+        and NOT just one-word 'Forbidden'. Tested by intercepting at the
+        urllib layer so this works offline."""
+        import urllib.error
+        from io import BytesIO
+
+        def fake_urlopen(req, timeout=None):
+            # Simulate the WAF returning 403 with a generic body.
+            raise urllib.error.HTTPError(
+                req.full_url, 403, "Forbidden",
+                {}, BytesIO(b'{"detail":"Forbidden"}'),
+            )
+
+        # Use python -c to actually invoke cmd_auth_forgot_key, since the
+        # error path calls sys.exit which would also exit pytest.
+        script = (
+            "import sys; sys.path.insert(0, %r);\n"
+            "import urllib.request, urllib.error;\n"
+            "from io import BytesIO;\n"
+            "def fake_urlopen(req, timeout=None):\n"
+            "    raise urllib.error.HTTPError(req.full_url, 403, 'Forbidden', {}, BytesIO(b'{}'))\n"
+            "urllib.request.urlopen = fake_urlopen;\n"
+            "from cygnus.cli import cmd_auth_forgot_key;\n"
+            "import argparse; ns = argparse.Namespace(email='x@y.test');\n"
+            "try:\n"
+            "    cmd_auth_forgot_key(ns)\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        ) % str(REPO_ROOT)
+        r = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=15, env=CLI_ENV,
+        )
+        full = r.stdout + r.stderr
+        assert "support@blackswan-software.ai" in full, (
+            f"On 403, CLI must offer the support@ recovery path but "
+            f"output didn't mention it.\n{full}"
+        )
+        assert full.strip().lower() != "error: forbidden", (
+            f"On 403, CLI fell back to the dead-end one-word error.\n{full}"
+        )
