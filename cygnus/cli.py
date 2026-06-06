@@ -282,6 +282,61 @@ def _queue_compilation(ecosystem: str, library: str, version: str = "latest"):
         pass  # Best-effort — don't block CLI on queue failure
 
 
+def cmd_help(args):
+    """Print the full command list grouped by purpose.
+
+    `cygnus -h` / `--help` give argparse's terse one-liner per
+    subcommand. `cygnus help` adds the per-group structure a new
+    user actually wants — what to run first, what to reach for when
+    locked out, what's CI-only, etc.
+    """
+    print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
+    sections = [
+        ("Account", [
+            ("signup",     "Create an account (free; pay-as-you-go optional)"),
+            ("login",      "Authenticate with an existing API key"),
+            ("status",     "Show current key fingerprint + tier + balance"),
+            ("logout",     "Clear stored credentials"),
+            ("forgotkey",  "Email a one-time token to rotate your key"),
+            ("userkey",    "Consume an emailed token — rotates + stores the new key"),
+            ("cancel",     "Cancel subscription (account stays on free tier)"),
+            ("uninstall",  "Cancel subscription + remove ALL local data"),
+        ]),
+        ("Verification (main loop)", [
+            ("verify",     "Verify one library or every dep in your lockfile"),
+            ("request",    "Explicitly enqueue a library for full verification"),
+            ("install",    "Download a pre-compiled, signed artifact"),
+            ("list",       "Show installed Cygnus artifacts vs native"),
+            ("check",      "Check for updates + CVEs"),
+            ("lock",       "Generate/refresh cygnus.lock"),
+            ("sbom",       "Export CycloneDX SBOM"),
+        ]),
+        ("Billing", [
+            ("account",    "Show balance + recent charges (verified tier)"),
+            ("deposit",    "Open Stripe Checkout to deposit USD into balance"),
+        ]),
+        ("Tools", [
+            ("init",       "Set up ~/.cygnus/ and configure resolution"),
+            ("cache",      "Manage local response cache (clear / status)"),
+            ("extension",  "Install editor extensions (VS Code / Cursor / VSCodium)"),
+            ("issue",      "File a bug report or feature request"),
+            ("help",       "This screen"),
+        ]),
+        ("Global flags", [
+            ("--version, -V",   "Print the CLI version"),
+            ("--ecosystem, -e", "Override auto-detected ecosystem"),
+            ("--no-cache",      "Bypass local cache (always hit API)"),
+        ]),
+    ]
+    for title, entries in sections:
+        print(f"  {title}")
+        for cmd, desc in entries:
+            print(f"    {cmd:<14}  {desc}")
+        print()
+    print("Per-command flags: cygnus <command> --help")
+    print("Source: https://github.com/blackswan-software/cygnus-cli")
+
+
 def cmd_request(args):
     """Explicitly request verification for a library.
 
@@ -810,8 +865,7 @@ def cmd_install(args):
 
     # Prompt signup if no API key (first-time user)
     if not API_KEY and not ci_mode:
-        print("  Tip: Run 'cygnus auth signup' for a free account")
-        print("       See https://blackswan-software.ai/pricing for paid tiers (pay-as-you-go, no subscription)")
+        print("  Tip: Run 'cygnus signup' for a free account")
         print()
 
     print(f"cygnus install {ecosystem}/{library}@{version}")
@@ -2489,39 +2543,18 @@ def cmd_auth_logout(args):
         if os.environ.get("CYGNUS_API_KEY"):
             print("  Note: CYGNUS_API_KEY env var is still set — unset it to fully deauthenticate.")
         return
+
+    print(f"  This will clear your stored API key from {CONFIG_FILE}.")
+    print(f"  Your account stays active on the server — to log back in run `cygnus login`.")
+    confirm = input("  Log out? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("  Cancelled. Still logged in.")
+        return
+
     del cfg["api_key"]
     cfg.pop("tier", None)
     _save_config(cfg)
-    print(f"  Logged out. Key cleared from {CONFIG_FILE}")
-
-
-def cmd_auth_cancel(args):
-    """Cancel subscription without uninstalling CLI."""
-    cfg = _load_config()
-    if not cfg.get("api_key") and not API_KEY:
-        print("  Not authenticated. Nothing to cancel.")
-        return
-
-    confirm = input("  Cancel your subscription? This does NOT delete your account. [y/N]: ").strip().lower()
-    if confirm != "y":
-        print("  Cancelled.")
-        return
-
-    url = f"{REGISTRY_URL}/auth/billing/cancel"
-    req = urllib.request.Request(url, method="POST")
-    req.add_header("User-Agent", "cygnus-cli/1.0")
-    req.add_header("X-API-Key", API_KEY or cfg.get("api_key", ""))
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            print(f"  Subscription cancelled. {data.get('message', 'Your account remains active on the free tier.')}")
-            cfg["tier"] = "free"
-            _save_config(cfg)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if hasattr(e, "read") else ""
-        print(f"  Error: {e.code} — {body}", file=sys.stderr)
-    except Exception as e:
-        print(f"  Error: {e}", file=sys.stderr)
+    print(f"  ✓ Logged out. Key cleared from {CONFIG_FILE}")
 
 
 def cmd_uninstall(args):
@@ -2596,7 +2629,7 @@ def cmd_auth_cancel(args):
         if data.get("active_until"):
             print(f"  Active until: {data['active_until'][:10]} (paid period ends)")
         print(f"\n  Your API key still works for free tier.")
-        print(f"  To reactivate: visit https://blackswan-software.ai/pricing")
+        print(f"  To reactivate: run `cygnus deposit <USD>` to add credit.")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             print("  No active subscription found.")
@@ -2670,7 +2703,7 @@ def cmd_account(args):
             ts = c.get("ts", "")[:19]
             print(f"    {ts}  {sign}${delta / 100:>7.2f}  {reason}")
     if balance_usd == 0:
-        print(f"\n  Deposit: visit https://blackswan-software.ai/pricing")
+        print(f"\n  Deposit: run `cygnus deposit <USD>` (Stripe Checkout in browser)")
         print(f"  Or run:  cygnus account --json (to script via API)")
 
 
@@ -2682,19 +2715,16 @@ def cmd_deposit(args):
     page; this command polls /auth/billing/balance to surface the new total.
 
     Usage:
-      cygnus deposit <USD>      # see website for current minimum
-      cygnus deposit 50 --no-open  # don't auto-open browser; print URL only
+      cygnus deposit <USD>          # minimum $10, maximum $1000 per deposit
+      cygnus deposit 50 --no-open   # don't auto-open browser; print URL only
     """
     amount_usd = int(getattr(args, "amount", 0) or 0)
     if amount_usd < 10:
-        print("  Error: deposit below minimum. See https://blackswan-software.ai/pricing for current minimum.", file=sys.stderr)
+        print("  Error: deposit below minimum ($10).", file=sys.stderr)
         sys.exit(1)
-    # Backend enforces deposit cap (see config). Fail-fast client-side to avoid a
-    # wasted Stripe API roundtrip; point users above the cap toward Enterprise.
     if amount_usd > 1000:
-        print(f"  Error: deposit exceeds maximum. See {url} for current cap.".format(url="https://blackswan-software.ai/pricing"), file=sys.stderr)
-        print(f"  Need more? Multiple deposits work, or contact support@blackswan-software.ai", file=sys.stderr)
-        print(f"  or contact support@blackswan-software.ai for Enterprise pricing.", file=sys.stderr)
+        print(f"  Error: deposit exceeds maximum ($1000 per transaction).", file=sys.stderr)
+        print(f"  Multiple deposits work, or contact support@blackswan-software.ai for Enterprise.", file=sys.stderr)
         sys.exit(1)
     amount_cents = amount_usd * 100
 
@@ -2735,7 +2765,7 @@ def cmd_deposit(args):
     checkout_url = data.get("checkout_url", "")
     if mode == "stub" or not checkout_url:
         print(f"  Stripe is not enabled on the server (mode={mode}).")
-        print(f"  Deposit unavailable. Try the website: https://blackswan-software.ai/pricing")
+        print(f"  Deposit temporarily unavailable. Contact support@blackswan-software.ai if this persists.")
         sys.exit(1)
 
     no_open = bool(getattr(args, "no_open", False))
@@ -2886,8 +2916,15 @@ def cmd_auth_reset_key(args):
     token = token.strip()
     if not token:
         print("  Error: token required.", file=sys.stderr)
-        print("  Run `cygnus forgot-key` first to receive a token by email.", file=sys.stderr)
+        print("  Run `cygnus forgotkey` first to receive a token by email.", file=sys.stderr)
         sys.exit(1)
+
+    print("  This will rotate your Cygnus API key. The current key will stop working.")
+    print("  Any machine using the old key (CI, scripts, other laptops) must be updated.")
+    confirm = input("  Continue? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("  Cancelled. Token NOT consumed — run again when ready.")
+        sys.exit(0)
 
     # POST /auth/reset-key/{token} — server side rotates by key_hash + returns the new raw key
     req = urllib.request.Request(
@@ -3047,7 +3084,7 @@ def _first_run_onboarding():
         print("    cygnus auth signup           Create account (free)")
         print()
         print("  Free: grade + CVE per the documented daily quota. No payment required.")
-        print("  See https://blackswan-software.ai/pricing for paid tiers (pay-as-you-go, no subscription).")
+        print("  Need more? `cygnus signup` then `cygnus deposit <USD>` (pay-as-you-go).")
 
     else:
         # Returning user
@@ -3444,34 +3481,34 @@ def main():
     p_verify.add_argument("--from-lock", action="store_true", help="Verify from cygnus.lock (no native lockfile needed)")
     p_verify.add_argument("--auto-lock", action="store_true", help="With --from-lock: auto-generate cygnus.lock if missing (no prompt). CI-friendly. CYGNUS_AUTO_LOCK=1 env var also works.")
 
-    p_auth = sub.add_parser("auth", help="Manage authentication")
-    auth_sub = p_auth.add_subparsers(dest="auth_command")
-    p_signup = auth_sub.add_parser("signup", help="Create account (free or pay-as-you-go)")
+    # 2026-06-06: auth commands flattened to top-level. The operator
+    # called the nested `cygnus auth login` / `cygnus auth signup` /
+    # etc. "stupid double commands" — auth IS the product, not a
+    # sub-namespace. Same single-word, no-dash convention as
+    # `cygnus verify` / `cygnus install` / `cygnus check` etc.
+    #
+    # forgot-key → forgotkey      (one word, no dash)
+    # reset-key → userkey         (CLI does the reset; user supplies the token)
+    p_signup = sub.add_parser("signup", help="Create an account (free or pay-as-you-go)")
     p_signup.add_argument("--tier", choices=["free", "verified", "enterprise"], default="free",
                           help="Account tier (verified=pay-as-you-go, enterprise=contact us)")
-    auth_sub.add_parser("login", help="Authenticate with your Cygnus API key")
-    auth_sub.add_parser("status", help="Show current auth state and key fingerprint")
-    auth_sub.add_parser("logout", help="Clear stored credentials")
-    auth_sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
-
-    # 2026-06-06: top-level forgot-key + user-key replace the buried
-    # `cygnus forgot-key` / `cygnus user-key`. Operator
-    # called these out as "stupid double commands" — recovery is the
-    # one path a user hits when they're already locked out of the
-    # normal auth flow, so it shouldn't be nested. `user-key`
-    # replaces the technically-accurate-but-confusing `reset-key`
-    # name: the CLI does the reset, the user just provides the token.
+    sub.add_parser("login", help="Authenticate with your Cygnus API key")
+    sub.add_parser("status", help="Show current auth state, tier, and key fingerprint")
+    sub.add_parser("logout", help="Clear stored credentials")
+    sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
     p_forgot = sub.add_parser(
-        "forgot-key",
+        "forgotkey",
         help="Email yourself a one-time token to rotate your API key (uses cached email)",
     )
     p_forgot.add_argument("--email",
                           help="Override the email cached in ~/.cygnus/config.json")
     p_userkey = sub.add_parser(
-        "user-key",
+        "userkey",
         help="Consume an emailed token, rotate the key, store the new one locally",
     )
     p_userkey.add_argument("token", help="The one-time token from the reset email")
+
+    sub.add_parser("help", help="Show the full command list with descriptions")
 
     sub.add_parser("uninstall", help="Uninstall Cygnus — cancel subscription + remove all data")
 
@@ -3488,7 +3525,7 @@ def main():
     p_deposit = sub.add_parser("deposit",
                                help="Add funds to your account via Stripe Checkout (opens browser)")
     p_deposit.add_argument("amount", type=int, metavar="USD",
-                           help="Amount in USD (see https://blackswan-software.ai/pricing for current minimum)")
+                           help="Amount in USD (minimum $10, maximum $1000 per deposit)")
     p_deposit.add_argument("--no-open", action="store_true",
                            help="Don't auto-open the browser; print the checkout URL only")
 
@@ -3581,8 +3618,20 @@ def main():
         cmd_check(args)
     elif args.command == "verify":
         cmd_verify(args)
-    elif args.command == "auth":
-        cmd_auth(args)
+    elif args.command == "signup":
+        cmd_auth_signup(args)
+    elif args.command == "login":
+        cmd_auth_login(args)
+    elif args.command == "status":
+        cmd_auth_status(args)
+    elif args.command == "logout":
+        cmd_auth_logout(args)
+    elif args.command == "cancel":
+        cmd_auth_cancel(args)
+    elif args.command == "forgotkey":
+        cmd_auth_forgot_key(args)
+    elif args.command == "userkey":
+        cmd_auth_reset_key(args)
     elif args.command == "cache":
         cmd_cache(args)
     elif args.command == "uninstall":
@@ -3597,10 +3646,8 @@ def main():
         cmd_extension(args)
     elif args.command == "request":
         cmd_request(args)
-    elif args.command == "forgot-key":
-        cmd_auth_forgot_key(args)
-    elif args.command == "user-key":
-        cmd_auth_reset_key(args)
+    elif args.command == "help":
+        cmd_help(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
