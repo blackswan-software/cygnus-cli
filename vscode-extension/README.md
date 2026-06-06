@@ -16,7 +16,7 @@ cygnus extension install vscode
 ```
 
 The extension reads `~/.cygnus/config.json` on activation, so a one-time
-`cygnus auth login` covers both the CLI and the extension. No manual paste
+`cygnus login` covers both the CLI and the extension. No manual paste
 into VS Code settings required.
 
 For a private build, point the installer at a local file:
@@ -55,7 +55,7 @@ The extension picks up your API key from, in order:
 
 1. `cygnus.apiKey` VS Code setting (explicit override)
 2. `CYGNUS_API_KEY` environment variable
-3. `~/.cygnus/config.json` `api_key` field — written by `cygnus auth login`
+3. `~/.cygnus/config.json` `api_key` field — written by `cygnus login`
 4. Free tier (no key) — 100 lookups/day
 
 ## Supported Ecosystems

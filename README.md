@@ -128,7 +128,7 @@ cygnus sbom -o sbom.json
 cygnus install flask
 
 # Sign up — no payment, no card
-cygnus auth signup
+cygnus signup
 
 # Report a bug
 cygnus issue
@@ -145,12 +145,12 @@ The Cygnus VS Code extension ships as a `.vsix` from this repo's
 no Microsoft Marketplace account or Open VSX dependency.
 
 ```sh
-cygnus auth login                  # one-time, writes ~/.cygnus/config.json
+cygnus login                       # one-time, writes ~/.cygnus/config.json
 cygnus extension install vscode    # downloads latest .vsix and installs
 ```
 
 The extension reads the same `~/.cygnus/config.json` the CLI writes, so a
-single `cygnus auth login` covers both. Inline import verification, hover
+single `cygnus login` covers both. Inline import verification, hover
 details, and command-palette actions across all 14 supported ecosystems.
 
 Source + e2e tests live in [vscode-extension/](./vscode-extension/).
