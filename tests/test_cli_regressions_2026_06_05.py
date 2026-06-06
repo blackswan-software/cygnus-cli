@@ -3,7 +3,7 @@
 Five user-facing bugs were filed against the published CLI:
 
   BUG 1  `cygnus --version` argparse-errors (no flag registered)
-  BUG 2  `cygnus auth forgot-key` returns 'Forbidden' from server
+  BUG 2  `cygnus forgot-key` returns 'Forbidden' from server
          (CLI code is clean; investigation pointed at Cloudflare WAF —
           not pinnable in a CLI-side test, see TODO at bottom)
   BUG 3  `cygnus verify` in a C++ project says "No lockfile found"

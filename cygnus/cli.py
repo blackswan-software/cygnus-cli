@@ -2426,11 +2426,19 @@ def cmd_auth_login(args):
     cfg = _load_config()
     cfg["api_key"] = key
     cfg["tier"] = data.get("tier", "unknown")
+    # 2026-06-06: cache email server-side returned from /auth/validate.
+    # `cygnus auth signup` already saves email; now login matches, so
+    # `cygnus forgot-key` can pre-fill instead of prompting every time.
+    email_from_server = data.get("email")
+    if email_from_server:
+        cfg["email"] = email_from_server
     _save_config(cfg)
 
     tier_name = data.get("tier_name") or data.get("tier", "unknown").upper()
     fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
     print(f"  Authenticated. Tier: {tier_name}  Key: ...{fingerprint}")
+    if email_from_server:
+        print(f"  Email: {email_from_server}")
     print(f"  Credentials stored in {CONFIG_FILE}")
 
 
@@ -2788,10 +2796,30 @@ def cmd_auth_forgot_key(args):
     """Request a one-time email token to rotate the API key.
 
     Usage:
-      cygnus auth forgot-key                       # prompts for email
-      cygnus auth forgot-key --email me@x.com
+      cygnus forgot-key                       # uses email from ~/.cygnus/config.json
+      cygnus forgot-key --email me@x.com      # explicit override
+
+    2026-06-06: pre-fill email from ~/.cygnus/config.json when present.
+    Both signup and login now cache the email there, so the only time we
+    fall back to prompting is when the user has no config at all (first
+    run on a new machine, OR config was wiped). Surfaced by operator —
+    "CLI shouldn't ask for email it should know email".
     """
-    email = getattr(args, "email", None) or input("  Email: ").strip()
+    explicit_email = getattr(args, "email", None)
+    cfg = _load_config()
+    cached_email = cfg.get("email") or ""
+    if explicit_email:
+        email = explicit_email
+    elif cached_email:
+        email = cached_email
+        print(f"  Using email from {CONFIG_FILE}: {email}")
+        print(f"  (override with --email if this is wrong)")
+    else:
+        try:
+            email = input("  Email: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  Cancelled.", file=sys.stderr)
+            sys.exit(1)
     if not email or "@" not in email:
         print("  Error: valid email required.", file=sys.stderr)
         sys.exit(1)
@@ -2845,20 +2873,20 @@ def cmd_auth_forgot_key(args):
 
     print("  ✓ If that email is registered, a reset token has been sent.")
     print("  Check your inbox, then run:")
-    print("    cygnus auth reset-key <TOKEN>")
+    print("    cygnus user-key <TOKEN>")
 
 
 def cmd_auth_reset_key(args):
     """Consume a one-time email token, rotate the API key, store the new key locally.
 
     Usage:
-      cygnus auth reset-key <TOKEN>
+      cygnus user-key <TOKEN>
     """
     token = getattr(args, "token", None) or ""
     token = token.strip()
     if not token:
         print("  Error: token required.", file=sys.stderr)
-        print("  Run `cygnus auth forgot-key` first to receive a token by email.", file=sys.stderr)
+        print("  Run `cygnus forgot-key` first to receive a token by email.", file=sys.stderr)
         sys.exit(1)
 
     # POST /auth/reset-key/{token} — server side rotates by key_hash + returns the new raw key
@@ -2878,7 +2906,7 @@ def cmd_auth_reset_key(args):
             detail = e.reason
         if e.code == 400:
             print(f"  Error: {detail}", file=sys.stderr)
-            print("  Tokens expire — request a fresh one with `cygnus auth forgot-key`.", file=sys.stderr)
+            print("  Tokens expire — request a fresh one with `cygnus forgot-key`.", file=sys.stderr)
         elif e.code == 404:
             print(f"  Error: {detail}", file=sys.stderr)
         else:
@@ -2921,11 +2949,18 @@ def cmd_auth(args):
     elif subcmd == "cancel":
         cmd_auth_cancel(args)
     elif subcmd == "forgot-key":
+        # 2026-06-06: nudge users to the new top-level command; still
+        # works so existing scripts don't break.
+        print("  (Tip: `cygnus forgot-key` is the new top-level form.)")
         cmd_auth_forgot_key(args)
     elif subcmd == "reset-key":
+        # 2026-06-06: replaced by top-level `cygnus user-key`. Still
+        # works; just nudges users to the new name.
+        print("  (Tip: `cygnus user-key <TOKEN>` is the new top-level form.)")
         cmd_auth_reset_key(args)
     else:
-        print("Usage: cygnus auth <signup|login|status|logout|cancel|forgot-key|reset-key>")
+        print("Usage: cygnus auth <signup|login|status|logout|cancel>")
+        print("Recovery moved to top-level: `cygnus forgot-key` + `cygnus user-key <TOKEN>`")
         print("  signup       — create account (free; pay-as-you-go available)")
         print("  login        — authenticate with existing API key")
         print("  status       — show current auth state + balance")
@@ -3418,10 +3453,25 @@ def main():
     auth_sub.add_parser("status", help="Show current auth state and key fingerprint")
     auth_sub.add_parser("logout", help="Clear stored credentials")
     auth_sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
-    p_forgot = auth_sub.add_parser("forgot-key", help="Email yourself a one-time token to rotate your API key")
-    p_forgot.add_argument("--email", help="Email address registered on your account (prompts if omitted)")
-    p_reset = auth_sub.add_parser("reset-key", help="Consume an emailed token, rotate the key, store it locally")
-    p_reset.add_argument("token", help="The one-time token from the reset email")
+
+    # 2026-06-06: top-level forgot-key + user-key replace the buried
+    # `cygnus forgot-key` / `cygnus user-key`. Operator
+    # called these out as "stupid double commands" — recovery is the
+    # one path a user hits when they're already locked out of the
+    # normal auth flow, so it shouldn't be nested. `user-key`
+    # replaces the technically-accurate-but-confusing `reset-key`
+    # name: the CLI does the reset, the user just provides the token.
+    p_forgot = sub.add_parser(
+        "forgot-key",
+        help="Email yourself a one-time token to rotate your API key (uses cached email)",
+    )
+    p_forgot.add_argument("--email",
+                          help="Override the email cached in ~/.cygnus/config.json")
+    p_userkey = sub.add_parser(
+        "user-key",
+        help="Consume an emailed token, rotate the key, store the new one locally",
+    )
+    p_userkey.add_argument("token", help="The one-time token from the reset email")
 
     sub.add_parser("uninstall", help="Uninstall Cygnus — cancel subscription + remove all data")
 
@@ -3547,6 +3597,10 @@ def main():
         cmd_extension(args)
     elif args.command == "request":
         cmd_request(args)
+    elif args.command == "forgot-key":
+        cmd_auth_forgot_key(args)
+    elif args.command == "user-key":
+        cmd_auth_reset_key(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
