@@ -211,6 +211,18 @@ def _api(path: str, use_cache: bool = True) -> dict | None:
         req.add_header("X-API-Key", API_KEY)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
+            # If server granted a grace credit (free tier past daily cap),
+            # surface that to the user so they know how close they are to
+            # the hard limit + how to request ongoing access.
+            grace_used = resp.headers.get("X-Cygnus-Grace-Granted")
+            grace_left = resp.headers.get("X-Cygnus-Grace-Remaining")
+            if grace_used:
+                print(
+                    f"\n  Heads up: you're past the free daily limit. "
+                    f"Grace used {grace_used} (remaining today: {grace_left}). "
+                    f"Email hello@blackswan-software.ai with your key prefix for ongoing access.",
+                    file=sys.stderr,
+                )
             data = json.loads(resp.read())
             if use_cache and data is not None:
                 _cache_set(path, data)
@@ -220,15 +232,26 @@ def _api(path: str, use_cache: bool = True) -> dict | None:
         if e.code == 404:
             return None
         if e.code == 429:
+            # Server's `detail` field includes the contact path + tier-specific
+            # message (incl. grace info when exhausted). Prefer it over hardcoded URL.
+            detail_text = ""
+            try:
+                body = e.read().decode()
+                detail_text = json.loads(body).get("detail", "") if body else ""
+            except Exception:
+                pass
             retry_after = None
             try:
                 retry_after = e.headers.get("Retry-After")
             except Exception:
                 pass
             print(f"\n  Daily limit reached.", file=sys.stderr)
+            if detail_text:
+                print(f"  {detail_text}", file=sys.stderr)
+            else:
+                print(f"  Upgrade at: https://blackswan-software.ai", file=sys.stderr)
             if retry_after:
                 print(f"  Resets in: {retry_after}s", file=sys.stderr)
-            print(f"  Upgrade at: https://auth.blackswan-software.ai", file=sys.stderr)
             return None
         if e.code == 401:
             print(f"  Not authenticated. Run: cygnus auth login", file=sys.stderr)
