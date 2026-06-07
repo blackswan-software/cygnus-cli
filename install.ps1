@@ -72,8 +72,9 @@ Write-Host "    cygnus signup                # create free account"
 Write-Host "    cygnus check                 # scan for CVEs"
 Write-Host "    cygnus help                  # full command list"
 Write-Host ""
-Write-Host "  Free: grade + CVE for the daily quota. No payment required." -ForegroundColor DarkGray
-Write-Host "  Need more? Run ``cygnus deposit <USD>`` (pay-as-you-go)." -ForegroundColor DarkGray
+Write-Host "  Free during launch. No card, no signup wall." -ForegroundColor DarkGray
+Write-Host "  Daily quota + 3 free grace credits if you hit the cap." -ForegroundColor DarkGray
+Write-Host "  Need more? Email hello@blackswan-software.ai with your key prefix." -ForegroundColor DarkGray
 
 # Cleanup
 Remove-Item $TempChecksum -Force -ErrorAction SilentlyContinue

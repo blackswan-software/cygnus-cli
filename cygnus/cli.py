@@ -1068,7 +1068,7 @@ def cmd_help(args):
     print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
     sections = [
         ("Account", [
-            ("signup",     "Create an account (free; pay-as-you-go optional)"),
+            ("signup",     "Create a free account (no card, no payment)"),
             ("login",      "Authenticate with an existing API key"),
             ("status",     "Show current key fingerprint + tier + balance"),
             ("logout",     "Clear stored credentials  [confirms]"),
@@ -1086,10 +1086,11 @@ def cmd_help(args):
             ("lock",       "Generate/refresh cygnus.lock"),
             ("sbom",       "Export CycloneDX SBOM"),
         ]),
-        ("Billing", [
-            ("account",    "Show balance + recent charges (verified tier)"),
-            ("deposit",    "Open Stripe Checkout to deposit USD into balance"),
-        ]),
+        # NB: paid-tier commands (account, deposit) intentionally omitted
+        # during free-period launch. They still exist as CLI commands and
+        # `cygnus --help` lists them alphabetically; this grouped screen
+        # just doesn't promote them. Restore when paid tiers launch + the
+        # TestNoPaywallRefsInFreePeriod pin is lifted.
         ("Tools", [
             ("init",       "Set up ~/.cygnus/ and configure resolution"),
             ("cache",      "Manage local response cache (clear / status)"),
@@ -1148,8 +1149,9 @@ def cmd_install(args):
 
     # Prompt signup if no API key (first-time user)
     if not API_KEY and not ci_mode:
-        print("  Tip: Run 'cygnus signup' for a free account (5 libs/day)")
-        print("       Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription)")
+        print("  Tip: Run 'cygnus signup' for a free account")
+        print("       Daily quota + 3 free grace credits if you hit the cap.")
+        print("       Email hello@blackswan-software.ai with your key prefix for more.")
         print()
 
     print(f"cygnus install {ecosystem}/{library}@{version}")
@@ -2604,12 +2606,17 @@ def _api_ext_post(path: str, body: dict) -> dict | None:
 # ── Auth ───────────────────────────────────────────────────────────────────
 
 def cmd_auth_signup(args):
-    """Create an account — free or verified (pay-as-you-go).
+    """Create a free Cygnus account.
 
     Usage:
-      cygnus signup                      # free tier (any email)
-      cygnus signup --tier verified      # pay-as-you-go ($10 min deposit)
-      cygnus signup --tier enterprise    # enterprise (corporate email required)
+      cygnus signup                # email-only signup, no card
+                                   # daily quota + 3 grace credits/day;
+                                   # email hello@blackswan-software.ai
+                                   # for more
+
+    Paid tiers (verified, enterprise) defer until the public payment
+    rollout. The internal --tier handling for those values is preserved
+    for forward-compat; the argparse surface accepts only `free`.
     """
     tier_choice = getattr(args, "tier", "free") or "free"
 
@@ -2950,8 +2957,11 @@ def cmd_account(args):
             ts = c.get("ts", "")[:19]
             print(f"    {ts}  {sign}${delta / 100:>7.2f}  {reason}")
     if balance_usd == 0:
-        print(f"\n  Deposit: run `cygnus deposit <USD>` (Stripe Checkout in browser)")
-        print(f"  Or run:  cygnus account --json (to script via API)")
+        # Free-period launch: don't promote deposit here. The CLI
+        # command still works; this just doesn't tell free-tier users
+        # to top up.
+        print(f"\n  You're on the free tier. Email hello@blackswan-software.ai")
+        print(f"  with your key prefix if you need more than the daily quota + 3 grace credits.")
 
 
 def cmd_auth_forgot_key(args):
@@ -3107,14 +3117,18 @@ def cmd_auth(args):
     elif subcmd == "reset-key":
         cmd_auth_reset_key(args)
     else:
-        print("Usage: cygnus auth <signup|login|status|logout|cancel|forgot-key|reset-key>")
-        print("  signup       — create account (free or $10 deposit pay-as-you-go)")
+        # Dead code: `auth` is no longer a registered subcommand
+        # (post-2026-06-06 flatten). argparse rejects `cygnus auth`
+        # before reaching this branch. Strings updated to flat command
+        # names anyway, in case anything routes here via deprecated path.
+        print("Usage: cygnus <signup|login|status|logout|cancel|forgotkey|userkey>")
+        print("  signup       — create a free account")
         print("  login        — authenticate with existing API key")
-        print("  status       — show current auth state + balance")
+        print("  status       — show current auth state")
         print("  logout       — clear stored credentials")
         print("  cancel       — cancel subscription (keep account)")
-        print("  forgot-key   — request reset email if you lost your key")
-        print("  reset-key    — consume an email token and rotate to a new key")
+        print("  forgotkey    — request reset email if you lost your key")
+        print("  userkey      — consume an email token and rotate to a new key")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -3191,10 +3205,10 @@ def _first_run_onboarding():
         print("    cygnus verify               Scan this project's dependencies")
         print("    cygnus verify <library>      Check a specific library")
         print("    cygnus check                 Scan for known CVEs")
-        print("    cygnus signup           Create account (free, 5 libs/day)")
+        print("    cygnus signup           Create a free account")
         print()
-        print("  Free: grade + CVE for 5 libs/day. No payment required.")
-        print("  Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription).")
+        print("  Free during launch. Daily quota + 3 free grace credits if you hit the cap.")
+        print("  Need more? Email hello@blackswan-software.ai with your key prefix.")
 
     else:
         # Returning user
@@ -3429,9 +3443,15 @@ def main():
     # The nested `cygnus auth X` namespace was removed in favor of
     # discoverable top-level cmds. Renamed `forgot-key`/`reset-key`
     # → `forgotkey`/`userkey` to drop the dashes per operator decision.
-    p_signup = sub.add_parser("signup", help="Create an account (free or pay-as-you-go)")
-    p_signup.add_argument("--tier", choices=["free", "verified", "enterprise"], default="free",
-                          help="Account tier (verified=$10 deposit pay-as-you-go, enterprise=contact us)")
+    p_signup = sub.add_parser("signup", help="Create a free account (no card, no payment)")
+    # NB: free-period launch — `--tier` accepts only `free` in the
+    # public surface. Internal code still handles verified/enterprise
+    # so server-side promotion works; the argparse choices list is
+    # the public contract and shows only the free option. Add the
+    # other tier choices back when paid tiers launch + the
+    # TestNoPaywallRefsInFreePeriod pin is lifted.
+    p_signup.add_argument("--tier", choices=["free"], default="free",
+                          help="Account tier (free during launch)")
     sub.add_parser("login", help="Authenticate with your Cygnus API key")
     sub.add_parser("status", help="Show current auth state, tier, and key fingerprint")
     sub.add_parser("logout", help="Clear stored credentials")
@@ -3457,7 +3477,7 @@ def main():
     cache_sub.add_parser("clear", help="Clear all cached results")
     cache_sub.add_parser("status", help="Show cache stats")
 
-    p_account = sub.add_parser("account", help="Show balance + usage (verified tier)")
+    p_account = sub.add_parser("account", help="Show account balance + usage")
     p_account.add_argument("--stripe-test", action="store_true",
                            help="Test mode: shows balance from stub endpoints (no real charges)")
     p_account.add_argument("--json", action="store_true", help="JSON output")
