@@ -68,10 +68,12 @@ Write-Host "  Cygnus CLI installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Get started:" -ForegroundColor Cyan
 Write-Host "    cygnus verify flask          # check a library"
-Write-Host "    cygnus auth signup           # create free account"
+Write-Host "    cygnus signup                # create free account"
 Write-Host "    cygnus check                 # scan for CVEs"
+Write-Host "    cygnus help                  # full command list"
 Write-Host ""
 Write-Host "  Free: grade + CVE for the daily quota. No payment required." -ForegroundColor DarkGray
+Write-Host "  Need more? Run ``cygnus deposit <USD>`` (pay-as-you-go)." -ForegroundColor DarkGray
 
 # Cleanup
 Remove-Item $TempChecksum -Force -ErrorAction SilentlyContinue

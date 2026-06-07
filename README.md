@@ -165,7 +165,7 @@ Python, Node.js, Go, Rust, Java, C#, Ruby, PHP, Kotlin, Scala, Swift, Dart, Elix
 
 ## Pricing
 
-Free tier available, Verified and Enterprise tiers offered. Full pricing at [blackswan-software.ai/pricing](https://blackswan-software.ai/pricing).
+Free tier available, Verified and Enterprise tiers offered. Full pricing details on the [Cygnus website](https://blackswan-software.ai).
 
 ---
 

@@ -211,9 +211,7 @@ def _api(path: str, use_cache: bool = True) -> dict | None:
         req.add_header("X-API-Key", API_KEY)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            # If server granted a grace credit (free tier past daily cap),
-            # surface that to the user so they know how close they are to
-            # the hard limit + how to request ongoing access.
+            # Surface grace-credit info if the server granted one
             grace_used = resp.headers.get("X-Cygnus-Grace-Granted")
             grace_left = resp.headers.get("X-Cygnus-Grace-Remaining")
             if grace_used:
@@ -232,8 +230,7 @@ def _api(path: str, use_cache: bool = True) -> dict | None:
         if e.code == 404:
             return None
         if e.code == 429:
-            # Server's `detail` field includes the contact path + tier-specific
-            # message (incl. grace info when exhausted). Prefer it over hardcoded URL.
+            # Prefer server's `detail` (includes tier-specific text + contact path)
             detail_text = ""
             try:
                 body = e.read().decode()
@@ -247,14 +244,21 @@ def _api(path: str, use_cache: bool = True) -> dict | None:
                 pass
             print(f"\n  Daily limit reached.", file=sys.stderr)
             if detail_text:
+                # Server-provided detail wins — auth-service includes the
+                # hello@blackswan-software.ai recovery path in its 429
+                # message text, plus tier-specific context.
                 print(f"  {detail_text}", file=sys.stderr)
             else:
-                print(f"  Upgrade at: https://blackswan-software.ai", file=sys.stderr)
+                # Server didn't ship a detail — surface the same recovery
+                # path the auth-service would have included. Email-based
+                # ask-for-more is the documented monetization-readiness
+                # signal (see containers/auth/app/main.py 429 handler).
+                print(f"  Email hello@blackswan-software.ai with your key prefix for ongoing access.", file=sys.stderr)
             if retry_after:
                 print(f"  Resets in: {retry_after}s", file=sys.stderr)
             return None
         if e.code == 401:
-            print(f"  Not authenticated. Run: cygnus auth login", file=sys.stderr)
+            print(f"  Not authenticated. Run: cygnus login", file=sys.stderr)
             return None
         print(f"  API error: {e.code} {e.reason}", file=sys.stderr)
         return None
@@ -1144,7 +1148,7 @@ def cmd_install(args):
 
     # Prompt signup if no API key (first-time user)
     if not API_KEY and not ci_mode:
-        print("  Tip: Run 'cygnus auth signup' for a free account (5 libs/day)")
+        print("  Tip: Run 'cygnus signup' for a free account (5 libs/day)")
         print("       Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription)")
         print()
 
@@ -2603,9 +2607,9 @@ def cmd_auth_signup(args):
     """Create an account — free or verified (pay-as-you-go).
 
     Usage:
-      cygnus auth signup                      # free tier (any email)
-      cygnus auth signup --tier verified      # pay-as-you-go ($10 min deposit)
-      cygnus auth signup --tier enterprise    # enterprise (corporate email required)
+      cygnus signup                      # free tier (any email)
+      cygnus signup --tier verified      # pay-as-you-go ($10 min deposit)
+      cygnus signup --tier enterprise    # enterprise (corporate email required)
     """
     tier_choice = getattr(args, "tier", "free") or "free"
 
@@ -2641,7 +2645,7 @@ def cmd_auth_signup(args):
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            print(f"  Already registered. Run: cygnus auth login")
+            print(f"  Already registered. Run: cygnus login")
             return
         body = e.read().decode() if e.fp else ""
         try:
@@ -2746,7 +2750,7 @@ def cmd_auth_status(args):
         source = str(CONFIG_FILE)
     else:
         print("  Not authenticated.")
-        print(f"  Run: cygnus auth login")
+        print(f"  Run: cygnus login")
         return
 
     fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
@@ -2754,16 +2758,30 @@ def cmd_auth_status(args):
     print(f"  Key fingerprint: ...{fingerprint}")
     print(f"  Registry: {REGISTRY_URL}")
 
-    # Fetch usage from server
+    # Fetch usage from server. Field names match auth-service /auth/usage
+    # response shape (containers/auth/app/main.py get_usage). Server-side
+    # renames happened 2026-06-06: daily_used→daily_count, daily_remaining
+    # →remaining_today, monthly_used→monthly_count. Prior CLI read the old
+    # names and showed 0 / "?" silently — the field-name drift was invisible.
     usage = _api("/auth/usage", use_cache=False)
     if usage:
         print(f"  Tier: {usage.get('tier', '?').upper()}")
-        daily = usage.get("daily_used", 0)
+        # Server returns the canonical field names: daily_count / daily_limit
+        # / remaining_today / monthly_count.
+        daily = usage.get("daily_count", 0)
         limit = usage.get("daily_limit", "?")
-        remaining = usage.get("daily_remaining", "?")
+        remaining = usage.get("remaining_today", "?")
         print(f"  Today: {daily} requests (limit: {limit}, remaining: {remaining})")
-        monthly = usage.get("monthly_used", 0)
+        monthly = usage.get("monthly_count", 0)
         print(f"  This month: {monthly} requests")
+        # billing_active + limits_enforced are top-level server flags users
+        # need to interpret their state. Without them: a Pro-tier user can't
+        # tell if their deposit is in test mode; a free-tier user can't tell
+        # if rate limits are even being enforced (vs server-disabled).
+        billing_active = usage.get("billing_active", False)
+        limits_enforced = usage.get("limits_enforced", False)
+        print(f"  Billing: {'live' if billing_active else 'test/stub mode'}")
+        print(f"  Rate limits: {'enforced' if limits_enforced else 'disabled (operator override)'}")
     else:
         tier = cfg.get("tier", "unknown") if not env_key else "unknown"
         if tier != "unknown":
@@ -2840,7 +2858,7 @@ def cmd_auth_cancel(args):
     cfg = _load_config()
     key = API_KEY or cfg.get("api_key", "")
     if not key:
-        print("  Not authenticated. Run: cygnus auth login")
+        print("  Not authenticated. Run: cygnus login")
         return
 
     print("  This will cancel your paid subscription.")
@@ -2887,7 +2905,7 @@ def cmd_account(args):
     cfg = _load_config()
     api_key = env_key or cfg.get("api_key", "")
     if not api_key:
-        print("  Not authenticated. Run: cygnus auth login")
+        print("  Not authenticated. Run: cygnus login")
         sys.exit(1)
 
     # --stripe-test sets env to override server flag (server still authoritative)
@@ -3005,19 +3023,19 @@ def cmd_auth_forgot_key(args):
 
     print("  ✓ If that email is registered, a reset token has been sent.")
     print("  Check your inbox, then run:")
-    print("    cygnus auth reset-key <TOKEN>")
+    print("    cygnus userkey <TOKEN>")
 
 
 def cmd_auth_reset_key(args):
     """Consume a one-time email token, rotate the API key, store the new key locally.
 
     Usage:
-      cygnus auth reset-key <TOKEN>
+      cygnus userkey <TOKEN>
     """
     token = (getattr(args, "token", None) or "").strip()
     if not token:
         print("  Error: token required.", file=sys.stderr)
-        print("  Run `cygnus auth forgot-key` first to receive a token by email.", file=sys.stderr)
+        print("  Run `cygnus forgotkey` first to receive a token by email.", file=sys.stderr)
         sys.exit(1)
 
     print("  This will rotate your Cygnus API key. The current key will stop working.")
@@ -3043,7 +3061,7 @@ def cmd_auth_reset_key(args):
             detail = e.reason
         if e.code == 400:
             print(f"  Error: {detail}", file=sys.stderr)
-            print("  Tokens expire — request a fresh one with `cygnus auth forgot-key`.", file=sys.stderr)
+            print("  Tokens expire — request a fresh one with `cygnus forgotkey`.", file=sys.stderr)
         elif e.code == 404:
             print(f"  Error: {detail}", file=sys.stderr)
         else:
@@ -3164,7 +3182,7 @@ def _first_run_onboarding():
             if remaining_data and remaining_data.get("offer_active"):
                 spots = remaining_data.get("remaining", "?")
                 print(f"  ★ FOUNDING MEMBER: {spots} spots left — 12 months Pro tier, free.")
-                print(f"    Run: cygnus auth signup")
+                print(f"    Run: cygnus signup")
                 print()
         except Exception:
             pass
@@ -3173,7 +3191,7 @@ def _first_run_onboarding():
         print("    cygnus verify               Scan this project's dependencies")
         print("    cygnus verify <library>      Check a specific library")
         print("    cygnus check                 Scan for known CVEs")
-        print("    cygnus auth signup           Create account (free, 5 libs/day)")
+        print("    cygnus signup           Create account (free, 5 libs/day)")
         print()
         print("  Free: grade + CVE for 5 libs/day. No payment required.")
         print("  Deposit $10 for full tokens + artifacts (pay-as-you-go, no subscription).")
@@ -3191,7 +3209,7 @@ def _first_run_onboarding():
             print("    cygnus verify <library>      Check a specific library")
             print("    cygnus check                 Scan for known CVEs")
             print("    cygnus install <library>     Download signed artifact")
-            print("    cygnus auth status           Account + usage stats")
+            print("    cygnus status           Account + usage stats")
     print()
 
 

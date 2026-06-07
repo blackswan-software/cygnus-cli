@@ -57,7 +57,7 @@
         "cygnus.apiKey": {
           "type": "string",
           "default": "",
-          "description": "Cygnus API key (free tier: 100 lookups/day). Leave blank to use the key stored by `cygnus auth login`."
+          "description": "Cygnus API key (free tier: 100 lookups/day). Leave blank to use the key stored by `cygnus login`."
         },
         "cygnus.registryUrl": {
           "type": "string",
