@@ -91,11 +91,33 @@ def _validate_ecosystem(eco: str | None) -> str | None:
 
 
 def _load_config() -> dict:
-    """Load ~/.cygnus/config.json. Returns empty dict if missing or corrupt."""
+    """Load ~/.cygnus/config.json. Returns empty dict if missing or corrupt.
+
+    Backward-compat shim: post-v0.1.13 the canonical shape is
+    {"active": <email>, "accounts": {<email>: {...}}}. For pre-v0.1.13
+    callers that read top-level api_key/tier/email, this function
+    auto-resolves from the active account when the new shape is on disk.
+    """
     try:
-        return json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        raw = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
     except (json.JSONDecodeError, OSError):
         return {}
+    # If new-shape config: surface the active account's fields at the
+    # top level so legacy callers keep working.
+    if "accounts" in raw and "active" in raw:
+        active_email = raw.get("active") or ""
+        active = (raw.get("accounts") or {}).get(active_email, {})
+        # Build a shim that looks like the old single-account dict
+        # but also retains the new fields for callers who want them.
+        return {
+            "api_key": active.get("api_key", ""),
+            "tier": active.get("tier", "free"),
+            "email": active_email,
+            # New-shape fields (used by accounts cmd):
+            "active": active_email,
+            "accounts": raw.get("accounts", {}),
+        }
+    return raw
 
 
 def _save_config(data: dict):
@@ -103,6 +125,162 @@ def _save_config(data: dict):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
     CONFIG_FILE.chmod(0o600)
+
+
+# ── Multi-account storage (v0.1.13) ────────────────────────────────────
+# Same human often has multiple Cygnus accounts (corp + personal, dev +
+# prod CI, etc.). Each = a separate signup email = a separate API key.
+# The CLI stores them all in ~/.cygnus/config.json under "accounts" with
+# an "active" pointer to the one currently in use. Old single-account
+# configs auto-migrate on first _load_accounts() call.
+#
+# CYGNUS_API_KEY env var still wins everything (CI use case): if set,
+# accounts switching has no effect within that invocation.
+
+
+def _load_accounts() -> dict:
+    """Return canonical multi-account config + auto-migrate from
+    legacy single-account shape on first read.
+
+    Returned shape (always — even on empty disk):
+      {
+        "active": "<email>" or None,
+        "accounts": {
+          "<email>": {"api_key": str, "tier": str, "label": str,
+                       "added": iso8601, "email_verified": bool},
+          ...
+        }
+      }
+
+    Legacy shape on disk:
+      {"api_key": "cyg_...", "tier": "free", "email": "x@y"}
+    becomes:
+      {"active": "x@y", "accounts": {"x@y": {"api_key": ..., ...}}}
+    The migrated file is written back to disk so subsequent reads see
+    the new shape directly.
+    """
+    try:
+        raw = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        raw = {}
+    if not raw:
+        return {"active": None, "accounts": {}}
+    # New shape already on disk
+    if "accounts" in raw and "active" in raw:
+        return {
+            "active": raw.get("active"),
+            "accounts": raw.get("accounts") or {},
+        }
+    # Legacy single-account shape — migrate.
+    api_key = raw.get("api_key", "")
+    email = raw.get("email") or ""
+    if not api_key:
+        return {"active": None, "accounts": {}}
+    if not email:
+        # Pre-2026-06-06 configs didn't cache email. Use a synthetic
+        # key so the account still has a label.
+        email = f"legacy-{hashlib.sha256(api_key.encode()).hexdigest()[:8]}@local"
+    migrated = {
+        "active": email,
+        "accounts": {
+            email: {
+                "api_key": api_key,
+                "tier": raw.get("tier", "free"),
+                "label": raw.get("label", ""),
+                "added": raw.get("added", ""),
+                "email_verified": raw.get("email_verified", False),
+            },
+        },
+    }
+    # Persist the migration so subsequent reads skip this branch.
+    try:
+        _save_config(migrated)
+    except Exception:
+        pass
+    return migrated
+
+
+def _save_accounts(data: dict):
+    """Persist the multi-account config to disk."""
+    _save_config({
+        "active": data.get("active"),
+        "accounts": data.get("accounts") or {},
+    })
+
+
+def _get_active_email() -> str:
+    """Return the currently-active account email, or ''."""
+    return _load_accounts().get("active") or ""
+
+
+def _set_active_email(email: str) -> bool:
+    """Mark the given email as the active account. Returns True on
+    success, False if the email isn't a known account."""
+    data = _load_accounts()
+    if email not in (data.get("accounts") or {}):
+        return False
+    data["active"] = email
+    _save_accounts(data)
+    return True
+
+
+def _add_account(email: str, api_key: str, tier: str = "free",
+                 label: str = "", email_verified: bool = False) -> None:
+    """Add an account to the local store and set it as active.
+    Overwrites any existing entry for the same email."""
+    from datetime import datetime, timezone
+    data = _load_accounts()
+    accounts = data.get("accounts") or {}
+    accounts[email] = {
+        "api_key": api_key,
+        "tier": tier,
+        "label": label,
+        "added": datetime.now(timezone.utc).isoformat(),
+        "email_verified": email_verified,
+    }
+    data["accounts"] = accounts
+    data["active"] = email
+    _save_accounts(data)
+
+
+def _remove_account(email: str) -> bool:
+    """Remove an account by email. If it was active, pick a remaining
+    one (or None) as the new active. Returns True if an account was
+    removed."""
+    data = _load_accounts()
+    accounts = data.get("accounts") or {}
+    if email not in accounts:
+        return False
+    del accounts[email]
+    data["accounts"] = accounts
+    if data.get("active") == email:
+        # Pick any remaining account; or None if empty.
+        data["active"] = next(iter(accounts), None)
+    _save_accounts(data)
+    return True
+
+
+def _active_api_key() -> str:
+    """Resolve the effective API key: env var first (CI), then the
+    active account from config. Used by API_KEY module constant."""
+    env = os.environ.get("CYGNUS_API_KEY", "")
+    if env:
+        return env
+    data = _load_accounts()
+    email = data.get("active")
+    if not email:
+        return ""
+    return (data.get("accounts") or {}).get(email, {}).get("api_key", "")
+
+
+def _active_key_source() -> str:
+    """Describe where the active API key came from. For status display."""
+    if os.environ.get("CYGNUS_API_KEY"):
+        return "CYGNUS_API_KEY env var"
+    email = _get_active_email()
+    if email:
+        return email
+    return ""
 
 
 # ── Local Cache (per API key, 24h TTL) ────────────────────────────────────
@@ -162,8 +340,10 @@ def _cache_set(path: str, payload: dict):
         pass  # Cache write failure is non-fatal
 
 
-# Env var takes precedence over stored config
-API_KEY = os.environ.get("CYGNUS_API_KEY", "") or _load_config().get("api_key", "")
+# Env var takes precedence over stored config. Multi-account aware via
+# _active_api_key (v0.1.13): falls through to the active account from
+# ~/.cygnus/config.json when CYGNUS_API_KEY is not set.
+API_KEY = _active_api_key()
 
 # Detect current platform target
 _ARCH = platform.machine()
@@ -1070,7 +1250,8 @@ def cmd_help(args):
         ("Account", [
             ("signup",     "Create a free account (no card, no payment)"),
             ("login",      "Authenticate with an existing API key"),
-            ("status",     "Show current key fingerprint + tier + balance"),
+            ("status",     "Show active account + tier + key fingerprint"),
+            ("accounts",   "List / switch / remove local accounts (multi-account)"),
             ("logout",     "Clear stored credentials  [confirms]"),
             ("forgot-key",  "Email a one-time token to rotate your key"),
             ("reset-key",    "Consume an emailed token — rotates + stores the new key  [confirms]"),
@@ -2743,25 +2924,115 @@ def cmd_auth_login(args):
     print(f"  Credentials stored in {CONFIG_FILE}")
 
 
+def cmd_accounts(args):
+    """List, switch, or remove local Cygnus accounts.
+
+    Multi-account: same human can have corp + personal accounts (separate
+    emails → separate Cygnus accounts → separate API keys). All are stored
+    in ~/.cygnus/config.json under "accounts"; one is "active" at a time.
+
+    Subcommands:
+      cygnus accounts                  — list all accounts; ✓ marks active
+      cygnus accounts switch <email>   — change which account is active
+      cygnus accounts remove <email>   — drop an account from the machine
+    """
+    sub = getattr(args, "accounts_command", None) or "list"
+    if sub in ("list", "ls", None):
+        data = _load_accounts()
+        accounts = data.get("accounts") or {}
+        env_set = bool(os.environ.get("CYGNUS_API_KEY"))
+        if env_set:
+            print("  CYGNUS_API_KEY env var set — overrides any locally-stored")
+            print("  accounts for this shell. (CI / scripts use this path.)")
+            print()
+        if not accounts:
+            print("  No local accounts. Run `cygnus signup` to create one.")
+            return
+        active = data.get("active")
+        print(f"  Accounts on this machine ({len(accounts)} total):")
+        for email, info in accounts.items():
+            marker = "✓" if (email == active and not env_set) else " "
+            tier = info.get("tier", "?")
+            label = info.get("label", "")
+            label_disp = f" [{label}]" if label else ""
+            print(f"    {marker} {email}{label_disp}  tier={tier}")
+        if len(accounts) > 1:
+            print()
+            print("  Switch with: cygnus accounts switch <email>")
+        return
+
+    if sub == "switch":
+        target = getattr(args, "target", "") or ""
+        target = target.strip()
+        if not target:
+            print("  Error: cygnus accounts switch <email>", file=sys.stderr)
+            sys.exit(1)
+        data = _load_accounts()
+        accounts = data.get("accounts") or {}
+        if target not in accounts:
+            print(f"  Error: '{target}' not found in local accounts.", file=sys.stderr)
+            if accounts:
+                print(f"  Known accounts:", file=sys.stderr)
+                for email in accounts:
+                    print(f"    {email}", file=sys.stderr)
+            else:
+                print(f"  (no local accounts — run `cygnus signup`)", file=sys.stderr)
+            sys.exit(1)
+        _set_active_email(target)
+        print(f"  ✓ Switched to {target}")
+        return
+
+    if sub == "remove":
+        target = getattr(args, "target", "") or ""
+        target = target.strip()
+        if not target:
+            print("  Error: cygnus accounts remove <email>", file=sys.stderr)
+            sys.exit(1)
+        if not _remove_account(target):
+            print(f"  Error: '{target}' not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"  ✓ Removed {target} from local accounts.")
+        print(f"  Server-side account NOT deleted — run `cygnus cancel` for that.")
+        return
+
+    print(f"  Unknown subcommand: {sub}", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_auth_status(args):
-    """Show current authentication state."""
+    """Show current authentication state.
+
+    Multi-account aware (v0.1.13): surfaces the active account's email +
+    a switch hint when 2+ accounts are stored. CYGNUS_API_KEY env var
+    takes precedence and is flagged explicitly so CI users can tell.
+    """
     env_key = os.environ.get("CYGNUS_API_KEY", "")
-    cfg = _load_config()
-    cfg_key = cfg.get("api_key", "")
+    accounts_data = _load_accounts()
+    accounts = accounts_data.get("accounts") or {}
+    active_email = accounts_data.get("active") or ""
 
     if env_key:
         key = env_key
         source = "CYGNUS_API_KEY env var"
-    elif cfg_key:
-        key = cfg_key
-        source = str(CONFIG_FILE)
+    elif active_email and accounts.get(active_email, {}).get("api_key"):
+        key = accounts[active_email]["api_key"]
+        source = active_email
     else:
         print("  Not authenticated.")
         print(f"  Run: cygnus login")
         return
 
     fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
-    print(f"  Authenticated [{source}]")
+    if env_key:
+        print(f"  Authenticated [{source}]")
+    else:
+        label = accounts.get(active_email, {}).get("label", "")
+        label_disp = f" [{label}]" if label else ""
+        print(f"  Active account: {active_email}{label_disp}")
+        if len(accounts) > 1:
+            other = [e for e in accounts if e != active_email]
+            print(f"  Other local accounts ({len(other)}): {', '.join(other[:3])}{'...' if len(other) > 3 else ''}")
+            print(f"  Switch with: cygnus accounts switch <email>")
     print(f"  Key fingerprint: ...{fingerprint}")
     print(f"  Registry: {REGISTRY_URL}")
 
@@ -2790,9 +3061,14 @@ def cmd_auth_status(args):
         print(f"  Billing: {'live' if billing_active else 'test/stub mode'}")
         print(f"  Rate limits: {'enforced' if limits_enforced else 'disabled (operator override)'}")
     else:
-        tier = cfg.get("tier", "unknown") if not env_key else "unknown"
-        if tier != "unknown":
-            print(f"  Tier: {tier.upper()}")
+        # Server unreachable — fall back to the cached tier on the
+        # active account (if any). env-var-only path has no cached tier.
+        cached_tier = (
+            accounts.get(active_email, {}).get("tier")
+            if (active_email and not env_key) else ""
+        )
+        if cached_tier:
+            print(f"  Tier: {cached_tier.upper()}")
         print(f"  (server unreachable — usage stats unavailable)")
 
 
@@ -3482,6 +3758,20 @@ def main():
                            help="Test mode: shows balance from stub endpoints (no real charges)")
     p_account.add_argument("--json", action="store_true", help="JSON output")
 
+    # `cygnus accounts` — multi-account management (v0.1.13). Same human
+    # often has corp + personal Cygnus accounts; let them list, switch,
+    # and remove without manually editing config.json.
+    p_accounts = sub.add_parser(
+        "accounts",
+        help="List, switch, or remove local Cygnus accounts (multi-account support)",
+    )
+    accounts_sub = p_accounts.add_subparsers(dest="accounts_command")
+    accounts_sub.add_parser("list", help="List all accounts on this machine (default)")
+    p_acc_switch = accounts_sub.add_parser("switch", help="Make a different account active")
+    p_acc_switch.add_argument("target", help="Email of the account to switch to")
+    p_acc_remove = accounts_sub.add_parser("remove", help="Remove an account from this machine (server-side stays)")
+    p_acc_remove.add_argument("target", help="Email of the account to remove")
+
     # `cygnus request <library>` — explicit verification request. `verify`
     # already auto-queues when a lib isn't in the corpus, but for users
     # whose lib IS in the corpus at a lower confidence the auto-queue
@@ -3592,6 +3882,8 @@ def main():
         cmd_uninstall(args)
     elif args.command == "account":
         cmd_account(args)
+    elif args.command == "accounts":
+        cmd_accounts(args)
     elif args.command == "issue":
         cmd_issue(args)
     elif args.command == "help":
