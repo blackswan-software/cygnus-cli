@@ -2884,43 +2884,112 @@ def cmd_auth_signup(args):
 
 
 def cmd_auth_login(args):
-    """Prompt for an API key, validate it, and store it in ~/.cygnus/config.json."""
-    print("Enter your Cygnus API key (starts with cyg_):")
-    try:
-        key = getpass.getpass("  Key: ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\n  Cancelled.", file=sys.stderr)
+    """Magic-link login: email a 6-digit code, paste it back, get authenticated.
+
+    Anthropic-style code-paste flow. The code is the primary surface (paste
+    into terminal). The email also contains a convenience link, but the code
+    is what authenticates. Key is rotated each login — that's the per-device
+    isolation property without per-device complexity.
+
+    Usage:
+      cygnus login                          # prompts for email + code
+      cygnus login --email me@example.com   # skips email prompt
+    """
+    # Step 1: email — from arg, cached config, or prompt
+    cfg = _load_config()
+    email = getattr(args, "email", None) or cfg.get("email", "")
+
+    if not email:
+        try:
+            email = input("  Email: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  Cancelled.", file=sys.stderr)
+            sys.exit(1)
+    elif not getattr(args, "email", None):
+        # Email came from cache — confirm with user
+        try:
+            ans = input(f"  Send sign-in code to {email}? [Y/n] ").strip().lower()
+            if ans in ("n", "no"):
+                email = input("  Email: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  Cancelled.", file=sys.stderr)
+            sys.exit(1)
+
+    if not email or "@" not in email:
+        print("  Error: valid email required.", file=sys.stderr)
         sys.exit(1)
 
-    if not key:
-        print("  Error: no key entered.", file=sys.stderr)
-        sys.exit(1)
-
-    # Validate against the auth service
-    req = urllib.request.Request(f"{REGISTRY_URL}/auth/validate")
-    req.add_header("User-Agent", "cygnus-cli/1.0")
-    req.add_header("X-Api-Key", key)
+    # Step 2: POST /auth/login → emails the code
+    payload = json.dumps({"email": email}).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/login",
+        data=payload, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+            json.loads(resp.read())  # response is generic per spec
     except urllib.error.HTTPError as e:
-        if e.code == 401:
-            print("  Error: invalid API key.", file=sys.stderr)
-        else:
-            print(f"  Error: {e.code} {e.reason}", file=sys.stderr)
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"  Connection error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    cfg = _load_config()
-    cfg["api_key"] = key
-    cfg["tier"] = data.get("tier", "unknown")
+    print(f"  ✓ Code sent to {email}. Check your inbox.")
+
+    # Step 3: prompt for code (or accept via --code)
+    code = getattr(args, "code", None)
+    if not code:
+        try:
+            code = input("  Code: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  Cancelled.", file=sys.stderr)
+            sys.exit(1)
+    if not code:
+        print("  Error: code required.", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 4: POST /auth/login-verify → get the key
+    payload = json.dumps({"email": email, "code": code}).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/login-verify",
+        data=payload, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        try:
+            detail = json.loads(body).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    new_key = data.get("api_key", "")
+    if not new_key:
+        print("  Error: server did not return a key.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg["api_key"] = new_key
+    cfg["email"] = data.get("email", email)
+    cfg["tier"] = data.get("tier", "free")
     _save_config(cfg)
 
-    tier_name = data.get("tier_name") or data.get("tier", "unknown").upper()
-    fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
-    print(f"  Authenticated. Tier: {tier_name}  Key: ...{fingerprint}")
+    tier_name = data.get("tier_name") or data.get("tier", "free").upper()
+    fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
+    print(f"  ✓ Logged in as {email}. Tier: {tier_name}  Key: ...{fingerprint}")
     print(f"  Credentials stored in {CONFIG_FILE}")
 
 
@@ -3728,7 +3797,9 @@ def main():
     # TestNoPaywallRefsInFreePeriod pin is lifted.
     p_signup.add_argument("--tier", choices=["free"], default="free",
                           help="Account tier (free during launch)")
-    sub.add_parser("login", help="Authenticate with your Cygnus API key")
+    p_login = sub.add_parser("login", help="Magic-link login — emails a 6-digit code, paste it back")
+    p_login.add_argument("--email", help="Email address (will prompt if omitted)")
+    p_login.add_argument("--code", help="6-digit code from email (will prompt after sending)")
     sub.add_parser("status", help="Show current auth state, tier, and key fingerprint")
     sub.add_parser("logout", help="Clear stored credentials")
     sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
