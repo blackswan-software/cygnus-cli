@@ -1227,7 +1227,7 @@ def cmd_extension_install(args):
               "automatically.")
     else:
         print("  Run `cygnus login` to authenticate (or leave blank for the "
-              "free tier — 100 lookups/day).")
+              "free tier — 5 libraries/day).")
     print("  Restart your editor to activate.")
 
 
@@ -1255,8 +1255,8 @@ def cmd_help(args):
             ("logout",     "Clear stored credentials  [confirms]"),
             ("forgot-key",  "Email a one-time token to rotate your key"),
             ("reset-key",    "Consume an emailed token — rotates + stores the new key  [confirms]"),
-            ("cancel",     "Cancel subscription (account stays on free tier)  [confirms]"),
-            ("uninstall",  "Cancel subscription + remove ALL local data  [confirms]"),
+            ("cancel",     "Deactivate account (data preserved, re-activate anytime)  [confirms]"),
+            ("uninstall",  "Deactivate account + remove ALL local data  [confirms]"),
         ]),
         ("Verification (main loop)", [
             ("verify",     "Verify one library or every dep in your lockfile"),
