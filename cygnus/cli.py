@@ -3290,9 +3290,10 @@ def cmd_account(args):
     print(f"  Balance:          ${balance_usd:.2f}")
     if total_deposited > 0:
         print(f"  Total deposited:  ${total_deposited:.2f}")
-    print(f"  Stripe enabled:   {'YES (live)' if stripe_on else 'NO (test/stub mode)'}")
-    if not stripe_on:
-        print(f"  Note: STRIPE_ENABLED is off — checkout endpoints return stub URLs.")
+    if stripe_on:
+        print(f"  Payments:         enabled")
+    else:
+        print(f"  Payments:         not yet available")
     if charges:
         print(f"\n  Recent charges ({len(charges)}):")
         for c in charges[-10:][::-1]:
@@ -3802,7 +3803,7 @@ def main():
     p_login.add_argument("--code", help="6-digit code from email (will prompt after sending)")
     sub.add_parser("status", help="Show current auth state, tier, and key fingerprint")
     sub.add_parser("logout", help="Clear stored credentials")
-    sub.add_parser("cancel", help="Cancel subscription (keep account on free tier)")
+    sub.add_parser("cancel", help="Deactivate account (data preserved, re-activate anytime)")
     p_forgot = sub.add_parser(
         "forgot-key",
         help="Email yourself a one-time token to rotate your API key (uses cached email)",
@@ -3817,16 +3818,14 @@ def main():
 
     sub.add_parser("help", help="Show the full command list grouped by purpose (not argparse's terse alphabetical view)")
 
-    sub.add_parser("uninstall", help="Uninstall Cygnus — cancel subscription + remove all data")
+    sub.add_parser("uninstall", help="Uninstall Cygnus — deactivate account + remove all local data")
 
     p_cache = sub.add_parser("cache", help="Manage local cache")
     cache_sub = p_cache.add_subparsers(dest="cache_command")
     cache_sub.add_parser("clear", help="Clear all cached results")
     cache_sub.add_parser("status", help="Show cache stats")
 
-    p_account = sub.add_parser("account", help="Show account balance + usage")
-    p_account.add_argument("--stripe-test", action="store_true",
-                           help="Test mode: shows balance from stub endpoints (no real charges)")
+    p_account = sub.add_parser("account", help="Show account usage")
     p_account.add_argument("--json", action="store_true", help="JSON output")
 
     # `cygnus accounts` — multi-account management (v0.1.13). Same human
@@ -3856,15 +3855,15 @@ def main():
     p_request.add_argument("version", nargs="?", default="latest",
                            help="Version (default: latest)")
 
-    # `cygnus deposit <USD>` — Stripe Checkout (PCI-compliant hosted form).
+    # `cygnus deposit <USD>` — Stripe Checkout (hidden pre-Stripe, command still works).
     p_deposit = sub.add_parser(
         "deposit",
-        help="Add funds to your account via Stripe Checkout (opens browser)",
+        help=argparse.SUPPRESS,
     )
     p_deposit.add_argument("amount", type=int, metavar="USD",
-                           help="Amount in USD (minimum $10, maximum $1000 per deposit)")
+                           help="Amount in USD")
     p_deposit.add_argument("--no-open", action="store_true",
-                           help="Don't auto-open the browser; print the checkout URL only")
+                           help="Print checkout URL only")
 
     # `cygnus extension install vscode` — distributes the VS Code extension
     # from the cygnus-cli GitHub releases page (no Marketplace dependency).
