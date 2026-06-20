@@ -2982,14 +2982,20 @@ def cmd_auth_login(args):
         print("  Error: server did not return a key.", file=sys.stderr)
         sys.exit(1)
 
+    login_email = data.get("email", email)
+    login_tier = data.get("tier", "free")
+
     cfg["api_key"] = new_key
-    cfg["email"] = data.get("email", email)
-    cfg["tier"] = data.get("tier", "free")
+    cfg["email"] = login_email
+    cfg["tier"] = login_tier
     _save_config(cfg)
 
-    tier_name = data.get("tier_name") or data.get("tier", "free").upper()
+    # Update multi-account store so `cygnus status` sees the new key
+    _add_account(login_email, new_key, tier=login_tier)
+
+    tier_name = data.get("tier_name") or login_tier.upper()
     fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
-    print(f"  ✓ Logged in as {email}. Tier: {tier_name}  Key: ...{fingerprint}")
+    print(f"  ✓ Logged in as {login_email}. Tier: {tier_name}  Key: ...{fingerprint}")
     print(f"  Credentials stored in {CONFIG_FILE}")
 
 
@@ -3130,14 +3136,7 @@ def cmd_auth_status(args):
         print(f"  Billing: {'live' if billing_active else 'test/stub mode'}")
         print(f"  Rate limits: {'enforced' if limits_enforced else 'disabled (operator override)'}")
     else:
-        # Server unreachable — fall back to the cached tier on the
-        # active account (if any). env-var-only path has no cached tier.
-        cached_tier = (
-            accounts.get(active_email, {}).get("tier")
-            if (active_email and not env_key) else ""
-        )
-        if cached_tier:
-            print(f"  Tier: {cached_tier.upper()}")
+        print(f"  Tier: unknown (server unreachable)")
         print(f"  (server unreachable — usage stats unavailable)")
 
 
@@ -3432,13 +3431,21 @@ def cmd_auth_reset_key(args):
         print("  Error: server did not return a new key.", file=sys.stderr)
         sys.exit(1)
 
+    email = data.get("email", "")
+    tier = data.get("tier", "free")
+
+    # Update both legacy config AND multi-account store
     cfg = _load_config()
     cfg["api_key"] = new_key
-    if data.get("tier"):
-        cfg["tier"] = data["tier"]
-    if data.get("email"):
-        cfg["email"] = data["email"]
+    if tier:
+        cfg["tier"] = tier
+    if email:
+        cfg["email"] = email
     _save_config(cfg)
+
+    # Multi-account: update the active account's key + tier
+    if email:
+        _add_account(email, new_key, tier=tier)
 
     fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
     print(f"  ✓ New API key stored. Old key invalidated.")
@@ -3855,15 +3862,18 @@ def main():
     p_request.add_argument("version", nargs="?", default="latest",
                            help="Version (default: latest)")
 
-    # `cygnus deposit <USD>` — Stripe Checkout (hidden pre-Stripe, command still works).
-    p_deposit = sub.add_parser(
-        "deposit",
-        help=argparse.SUPPRESS,
-    )
-    p_deposit.add_argument("amount", type=int, metavar="USD",
-                           help="Amount in USD")
-    p_deposit.add_argument("--no-open", action="store_true",
-                           help="Print checkout URL only")
+    # `cygnus deposit <USD>` — Stripe Checkout. Only register the subparser
+    # when Stripe is enabled (CYGNUS_STRIPE=1). Pre-Stripe: command doesn't
+    # appear in --help at all. Post-Stripe: flip the env var.
+    if os.environ.get("CYGNUS_STRIPE") == "1":
+        p_deposit = sub.add_parser(
+            "deposit",
+            help="Add funds to your account via Stripe Checkout (opens browser)",
+        )
+        p_deposit.add_argument("amount", type=int, metavar="USD",
+                               help="Amount in USD (minimum $10, maximum $1000)")
+        p_deposit.add_argument("--no-open", action="store_true",
+                               help="Print checkout URL only")
 
     # `cygnus extension install vscode` — distributes the VS Code extension
     # from the cygnus-cli GitHub releases page (no Marketplace dependency).
