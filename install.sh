@@ -41,7 +41,7 @@ fail()  { printf "%b\n" "${RED}  ✗${NC} $*"; exit 1; }
 # Skip with CYGNUS_NO_PREAMBLE=1 (useful for CI/automation).
 if [ "${CYGNUS_NO_PREAMBLE:-}" != "1" ]; then
     echo ""
-    printf "%b\n" "${BOLD}Cygnus CLI v${CLI_VERSION} — installer${NC}"
+    printf "%b\n" "${BOLD}Cygnus CLI — installer${NC}"
     echo "─────────────────────────────────────────────────"
     printf "%b\n" "${BOLD}Will:${NC}"
     echo "  • Download ~8 MB binary from cygnus-registry.sfo3.cdn.digitaloceanspaces.com"
@@ -81,7 +81,7 @@ case "$ARCH" in
 esac
 
 BINARY_NAME="cygnus-${OS}-${ARCH}"
-info "Installing Cygnus CLI v${CLI_VERSION} for ${OS}-${ARCH}"
+info "Installing Cygnus CLI for ${OS}-${ARCH}"
 
 # ── 2. Download binary ──────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
@@ -138,7 +138,8 @@ fi
 
 # ── 6. Done ─────────────────────────────────────────────────────────
 echo ""
-info "Cygnus CLI installed!"
+INSTALLED_VERSION=$("$INSTALL_DIR/cygnus" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+info "Cygnus CLI v${INSTALLED_VERSION} installed!"
 echo ""
 printf "%b\n" "  ${CYAN}Get started:${NC}"
 echo "    cygnus verify flask          # check a library"
