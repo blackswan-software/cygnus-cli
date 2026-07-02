@@ -1,0 +1,154 @@
+{
+  "_schema_note": "Each entry: pattern is a Python regex run against (title + body). reply is markdown commented on the issue. close: true marks the issue closed. label: optional GitHub label to apply. First match wins (top-to-bottom) \u2014 keep specific patterns above broad ones. Edit + commit to refine.",
+  "_ip_check": "Replies are scrubbed of internal IP: no synthesis chain, no composition-vector counts, no cross-language mapping counts, no Phoenix/Mythos/DeepSeek/corpus references, no specific detection mechanisms beyond what's on the public website (sandbox + grade + sign). Re-run the scrub on every PR that touches this file.",
+  "_sync_note": "This file is mirrored to black-swan-software/src/data/faq.json \u2014 both are loaded by the GitHub regex bot and the website chat widget. Update both together.",
+  "patterns": [
+    {
+      "name": "command-not-found",
+      "pattern": "(?i)(command not found.*cygnus|cygnus.*command not found|cygnus: not found|cygnus: command not found)",
+      "label": "user-error/install",
+      "close": true,
+      "reply": "Sounds like the CLI isn't on your `PATH`. \n\nInstall (or reinstall) via:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThen confirm `~/.local/bin` is on `$PATH`:\n\n```bash\necho $PATH | tr ':' '\\n' | grep .local/bin\n```\n\nIf missing, add `export PATH=\"$HOME/.local/bin:$PATH\"` to your shell init (e.g. `~/.bashrc`).\n\nClosing \u2014 reopen if you still see this after a fresh install."
+    },
+    {
+      "name": "glibc-mismatch",
+      "pattern": "(?i)(GLIBC.*version|GLIBC_2\\.|version `GLIBC|libc.so.6.*GLIBC|cannot find.*GLIBC)",
+      "label": "user-error/old-binary",
+      "close": true,
+      "reply": "This was a bug in v0.1.0 \u2014 the binary was built on GLIBC 2.38 and wouldn't load on Ubuntu 22.04 / Debian 12 / older. **Fixed in v0.1.1+**.\n\nReinstall to pick up the current build:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThe install script defaults to `latest` which auto-tracks the newest release. Verify with `cygnus --version` afterward.\n\nClosing \u2014 reopen if you still see GLIBC errors after upgrading."
+    },
+    {
+      "name": "no-lockfile",
+      "pattern": "(?i)(no cygnus\\.lock|lockfile not found|cygnus\\.lock.*not.*exist|missing.*cygnus.*lock)",
+      "label": "user-error/lockfile",
+      "close": true,
+      "reply": "Hi \u2014 looks like you don't have a `cygnus.lock` yet. **Run `cygnus lock` from your project root to generate one**, then retry `cygnus verify --from-lock`.\n\nAs of v0.1.3+, `cygnus verify --from-lock` will offer to generate the lockfile for you interactively (or pass `--auto-lock` for CI). If you're on an older CLI, update via `curl -fsSL https://install.blackswan-software.ai | sh`.\n\nClosing \u2014 reopen if this doesn't solve it."
+    },
+    {
+      "name": "403-paid-tokens",
+      "pattern": "(?is)(?:tokens/verified[\\s\\S]*(?:403|forbidden|not authorized)|(?:403|forbidden|not authorized)[\\s\\S]*tokens/verified|paid.*tier.*required)",
+      "label": "user-error/tier",
+      "close": true,
+      "reply": "Some endpoints are reserved for paid tiers that haven't launched yet (free-period launch). Free tier `cygnus verify <lib>` gives you grade + CVE info per library, which is the main verification use case.\n\nIf you need full token JSON (function-level verification data) before the paid tier launches, email <hello@blackswan-software.ai> with your key prefix and your use case.\n\nClosing \u2014 reopen when the paid tier ships or if you need an interim arrangement."
+    },
+    {
+      "name": "stripe-not-enabled",
+      "pattern": "(?i)(stripe.*not enabled|stub.*checkout|STRIPE_ENABLED.*false|deposit.*unavailable)",
+      "label": "infra/stripe-off",
+      "close": false,
+      "reply": "Payment plumbing is off during the free-period launch (intentional). Every account is free; daily quota + 3 grace credits/day; email <hello@blackswan-software.ai> with your key prefix for more.\n\nLeaving open as a tracker \u2014 will close when paid tiers launch."
+    },
+    {
+      "name": "ci-integration-help",
+      "pattern": "(?i)(github action|gitlab ci|circleci|jenkins|ci pipeline|how.*use.*ci|integrate.*ci|use in ci|use.*cygnus.*in.*github)",
+      "label": "question/ci",
+      "close": true,
+      "reply": "For GitHub Actions, we publish a composite Action:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    ecosystem: python  # or npm/go/maven/etc\n```\n\nThis handles sha256-verified CLI download (linux-x86_64, linux-arm64, darwin-arm64), then runs `cygnus verify --ci` against your lockfile. Full docs in the [README](https://github.com/blackswan-software/cygnus-cli#use-in-github-actions).\n\nFor GitLab CI / CircleCI / Jenkins / others, the recipe is:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\nexport PATH=\"$HOME/.local/bin:$PATH\"\ncygnus verify --ci --from-lock\n```\n\n`--ci` returns non-zero on any grade below your threshold (default `FULLY_VERIFIED`). Combine with `--auto-lock` if you don't commit `cygnus.lock`.\n\nClosing \u2014 reopen if you hit a specific CI provider that needs example config."
+    },
+    {
+      "name": "coexist-with-package-managers",
+      "pattern": "(?i)(replace npm|replace pip|replace cargo|replace.*package manager|still use npm|still use pip|do I.*need npm|alongside npm|alongside pip|with my existing|switch from npm|abandon npm|work with npm|integrate with npm|\\bnpm\\b|\\bpip\\b|\\bcargo\\b|\\bgem\\b|\\bmaven\\b|\\bnuget\\b|\\bcomposer\\b|pipenv|yarn|pnpm)",
+      "label": "question/coexist",
+      "close": true,
+      "reply": "Short answer: **yes, npm / pip / cargo / gem / Maven / NuGet / composer all still work normally.** Cygnus is additive, not a replacement.\n\n**How it composes with your existing toolchain:**\n\n- **`cygnus verify`** reads your existing lockfile (`package-lock.json`, `requirements.txt`, `Cargo.lock`, etc.) and confirms each library is verified + signed. You keep using npm/pip/cargo to install \u2014 Cygnus just adds a verification gate.\n\n- **`cygnus install`** is an *optional* faster path. It downloads pre-compiled artifacts from our CDN instead of running `pip install` / `npm install` from scratch (Python 19x, Go 20x, Node 3x faster in CI). You can use it or skip it \u2014 it's not required.\n\n**Typical CI flow staying with npm:**\n```bash\nnpm ci                           # normal install\ncygnus verify --from-lock --ci   # gate the build on verification\n```\n\n**Typical CI flow using Cygnus install for speed:**\n```bash\ncygnus install                   # pre-compiled, signed, faster\ncygnus verify --from-lock --ci   # same gate\n```\n\nBoth produce the same dependency tree. Pick whichever fits your existing pipeline.\n\nClosing \u2014 reopen if your specific toolchain has a wrinkle (monorepos, private registries, etc.)."
+    },
+    {
+      "name": "install-cygnus",
+      "pattern": "(?i)(how.*install|install.*cygnus|installation|installer|set up cygnus|setup cygnus|get cygnus|how.*download.*cygnus|chocolatey|homebrew|brew install|scoop install|apt install cygnus|yum install cygnus|cygnus.*windows.*install|cygnus.*mac.*install|\\bupgrade\\b|update cygnus|cygnus.*update|uninstall|remove cygnus|\\bmacos\\b|windows install|linux install|mac install|cygnus.*\\bversion\\b|--version)",
+      "label": "question/install",
+      "close": true,
+      "reply": "Install the CLI with one command:\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai | sh\n```\n\nThis fetches a small bash installer (~140 lines, readable) that:\n1. Detects your OS + arch (linux-x86_64, linux-arm64, darwin-arm64, windows-x86_64)\n2. Downloads the matching binary from `cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/`\n3. Verifies the SHA-256 against the published `.sha256` file\n4. Installs to `~/.local/bin/cygnus`\n\n**Security-aware install** (recommended for production / CI bootstrap):\n\n```bash\ncurl -fsSL https://install.blackswan-software.ai > install.sh\nless install.sh   # read it first\nsh install.sh\n```\n\n**Manual / air-gapped**: download the binary + `.sha256` directly from the [CDN](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/) and verify yourself.\n\n**Package manager distributions** (Homebrew, Chocolatey, Scoop, apt/yum): on the roadmap, not shipped yet. Use the curl install script today \u2014 it produces the same binary that a Homebrew/Chocolatey package would.\n\n**Upgrade** \u2014 re-run the install script. It always pulls the latest release.\n\n**Uninstall** \u2014 `rm ~/.local/bin/cygnus` (and remove any `export PATH` line you added). The CLI is a single binary; no other state on disk.\n\nAfter install, verify:\n\n```bash\ncygnus --version\ncygnus signup    # email-only signup, free tier\n```\n\nIf `cygnus: command not found`, add `~/.local/bin` to your `$PATH`."
+    },
+    {
+      "name": "quick-start",
+      "pattern": "(?i)(how.*use cygnus|how do.*get started|quick start|getting started|first.*verification|basic usage|tutorial|how do I run cygnus)",
+      "label": "question/quickstart",
+      "close": true,
+      "reply": "Fastest path from install \u2192 first verification:\n\n```bash\n# Sign up (free tier, email only, no card)\ncygnus signup\n\n# From inside your project directory:\ncygnus lock        # one-time: scans your project, writes cygnus.lock\ncygnus verify --from-lock\n```\n\nYou'll see per-library output like:\n\n```\n\u2713 flask@3.1.0 \u2014 FULLY_VERIFIED (47 functions verified)\n\u2713 requests@2.33.1 \u2014 FULLY_VERIFIED (176 functions verified)\n```\n\n**`cygnus verify` works alongside your existing package manager** \u2014 npm, pip, cargo, gem all still work normally. Cygnus adds a verification gate on top of whatever you already use.\n\nFor a faster install path, `cygnus install` is an *optional* alternative that uses pre-compiled artifacts (Python 19x, Go 20x, Node 3x faster in CI). You can use it or stick with `pip install` / `npm install` \u2014 your choice.\n\nFor CI: see the `how do I use cygnus in CI?` question, or just add this to your GitHub Actions workflow:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    ecosystem: python\n```\n\nFree tier: the documented daily quota. Need more? Ask about \"adding tokens.\"\n\nClosing \u2014 reopen for specific questions about your setup."
+    },
+    {
+      "name": "add-more-tokens",
+      "pattern": "(?i)(more tokens|add tokens|top.?up|recharge|add.*balance|add.*credit|out of tokens|ran out|usage limit|rate.?limit|deposit more)",
+      "label": "question/billing",
+      "close": true,
+      "reply": "Cygnus is in a free-period launch \u2014 every account is free, no card required.\n\nFree quota + 3 grace credits per day if you hit the cap. Past that, email <hello@blackswan-software.ai> with your key prefix and we'll set you up for ongoing access.\n\nPaid tiers will be announced separately. No pricing details to share yet.\n\nClosing \u2014 reopen with your usage pattern if you need help."
+    },
+    {
+      "name": "pricing-overview",
+      "pattern": "(?i)(\\bpricing\\b|\\bcost\\b|how much|\\bprice\\b|free tier|verified tier|enterprise tier|tier.*structure|\\bsubscription\\b|monthly cost|annual cost|how do you bill|billing model)",
+      "label": "question/pricing",
+      "close": true,
+      "reply": "Cygnus is in a free-period launch \u2014 every account is free, no card required.\n\nFree quota + 3 grace credits per day if you hit the cap. Past that, email <hello@blackswan-software.ai> with your key prefix and we'll set you up for ongoing access.\n\nPaid tiers will be announced separately. No pricing details to share yet.\n\nClosing \u2014 reopen with your usage pattern if you need help."
+    },
+    {
+      "name": "what-is-cygnus-lock",
+      "pattern": "(?i)(what.*cygnus\\.lock|cygnus.lock.*format|lockfile.*purpose|what.*lockfile|why.*lockfile|explain.*lock)",
+      "label": "question/concept",
+      "close": true,
+      "reply": "`cygnus.lock` is a small JSON manifest that lists your project's libraries pinned to specific verified versions. Think of it like `package-lock.json` or `Gemfile.lock` \u2014 same idea, but the versions are Cygnus-verified-and-signed instead of just registry-installed.\n\n**What's in it:**\n- One entry per library: name, version, ecosystem, expected SHA-256, verification grade at the time of lock\n- A top-level `lock_version` so we can evolve the format safely\n\n**When to regenerate:**\n- After upgrading any dependency\n- When `cygnus verify --from-lock` reports a grade mismatch (means we re-graded since you locked)\n\n**Commands:**\n\n```bash\ncygnus lock                              # generate (auto-detects ecosystem)\ncygnus verify --from-lock                # check every library in the lock\ncygnus verify --from-lock --auto-lock    # auto-generate if missing (CI-friendly)\n```\n\nCommit `cygnus.lock` to git alongside your other lockfiles. CI then verifies it on every PR.\n\nClosing \u2014 reopen for specific lockfile-format questions."
+    },
+    {
+      "name": "soc2-hipaa-compliance",
+      "pattern": "(?i)(soc.?2|soc ii|hipaa|iso.?27001|pci.?dss|fedramp|compliance.*cert|regulated industry|audit ready)",
+      "label": "question/enterprise",
+      "close": false,
+      "reply": "Compliance certifications (SOC2 Type II / HIPAA / ISO 27001 / FedRAMP) are on our pre-Enterprise roadmap.\n\nWhat we have today that maps to those frameworks:\n- Hashed API keys (not plaintext storage)\n- Authenticated origin via Cloudflare AOP\n- Encrypted transport (TLS 1.2+)\n- Tenant isolation via per-key rate limiting\n- Internal secrets audit completed 2026-04-20\n- External audit on the pre-Enterprise roadmap\n\nIf you're in a regulated industry and exploring Cygnus, please email <support@blackswan-software.ai> with your compliance requirements \u2014 we can prioritize whichever certification matches your timeline.\n\nLeaving open as a tracking request."
+    },
+    {
+      "name": "report-wrong-grade",
+      "pattern": "(?i)(wrong grade|incorrect.*verification|false positive|false negative|misclassified|library.*should.*verified|grade.*disputes?)",
+      "label": "feedback/grade",
+      "close": false,
+      "reply": "Thanks for flagging. We take grade accuracy seriously. To help us investigate, please include in this issue:\n\n1. The library name + version (`name==version` format)\n2. The grade Cygnus assigned vs what you believe is correct\n3. If applicable, a minimal repro showing the discrepancy (failing function, expected behavior, observed behavior)\n4. Your CLI version (`cygnus --version`)\n\nGrades are determined by sandboxed execution against published documentation, so a 'wrong grade' usually means either (a) the documentation is ambiguous about a function's behavior, (b) we have a stale doc snapshot, or (c) the sandbox environment differs from your expectation (e.g. network-bound code).\n\nWe re-run verification on demand for disputed grades \u2014 leaving open while we investigate."
+    },
+    {
+      "name": "what-is-verified-token",
+      "pattern": "(?i)(what.*verified token|what.*in.*token|token contents|token format|what does verified mean|what is FULLY_VERIFIED|what is ALL_OK|what is TESTS_PASS|what is PARTIALLY_VERIFIED|grade.*definitions?)",
+      "label": "question/concept",
+      "close": true,
+      "reply": "A **verified token** is a signed JSON manifest describing what a library version does and our confidence in it. Fields include:\n\n- `library` + `version` + ecosystem\n- `functions[]` \u2014 each function's signature + behavior verdict from sandboxed execution\n- `grade` \u2014 one of `FULLY_VERIFIED` / `ALL_OK` / `TESTS_PASS` / `PARTIALLY_VERIFIED` (declining confidence)\n- `not_before` / `not_after` \u2014 token validity window\n- `signature` \u2014 Ed25519 over the canonical-JSON body\n- `cve_status` \u2014 pulled from OSV.dev at sign-time\n\nFree tier gets the grade + signature (`cygnus verify <lib>` works). The token *body* (function verdicts) is paid-tier \u2014 that's the artifact AI agents use to constrain code generation.\n\nGrades by status:\n- **FULLY_VERIFIED** \u2014 every exported function executed correctly in sandbox\n- **ALL_OK** \u2014 passed structural checks but not every function ran\n- **TESTS_PASS** \u2014 library's own test suite passed in sandbox\n- **PARTIALLY_VERIFIED** \u2014 some functions verified, others gaps\n\nClosing \u2014 reopen for deeper questions on a specific field."
+    },
+    {
+      "name": "library-update-cadence",
+      "pattern": "(?i)(how.*often.*re-verif|update.*cadence|stale.*verification|when.*update.*library|fresh.*token|re-verification|outdated.*grade)",
+      "label": "question/freshness",
+      "close": true,
+      "reply": "Re-verification cadence:\n\n- **New library version published** \u2014 picked up automatically, with popular libraries verified faster than long-tail. Each version is independently graded; the token is keyed on `name@version`.\n- **CVE disclosed** \u2014 re-grade triggered on OSV.dev update. The token's `cve_status` field updates without changing the signature (CVE metadata is an out-of-band annotation).\n- **Existing-version drift** \u2014 verified artifacts are immutable (content-addressed). If a registry republishes a malicious version under the same `name@version`, our cached artifact still verifies but a fresh re-fetch against upstream would fail integrity checks.\n\nIf a verification looks stale, file an issue with `cygnus issue --library <name>@<version>` and we'll re-grade.\n\nClosing \u2014 reopen if a specific library shows stale data for >7 days after a known upstream release."
+    },
+    {
+      "name": "self-host-registry",
+      "pattern": "(?i)(self-host|on-prem|on premise|air-gap.*registry|host.*registry|private.*registry|run our own|internal mirror)",
+      "label": "question/deployment",
+      "close": true,
+      "reply": "The registry itself is not self-hostable \u2014 verification runs on our infrastructure and is a paid service (free tier is a fair-use slice of the same registry).\n\nHowever:\n- **CLI is MIT-licensed** (this repo) and can be installed offline if you mirror the binaries.\n- **Verified artifacts are SHA-256 + Ed25519 signed**, so once you've pulled an artifact you can cache and re-verify it indefinitely without contacting us.\n- **Air-gapped CI flows work** if you pre-pull verified artifacts to your artifact server. Offline-verify-mode is on the roadmap.\n\nIf you need a true private mirror for regulated/SCIF environments, that's an Enterprise conversation: <support@blackswan-software.ai>.\n\nClosing \u2014 reopen with your specific use-case if the above doesn't fit."
+    },
+    {
+      "name": "supported-ecosystems",
+      "pattern": "(?i)(what.*ecosystems|what.*languages|which.*languages|which.*ecosystems|do you support|coverage.*language|\\bpython\\b|\\bjavascript\\b|\\btypescript\\b|\\bjava\\b|\\bgolang\\b|\\bruby\\b|\\bphp\\b|\\bcsharp\\b|\\bc#\\b|\\bnodejs\\b|\\bnode\\.js\\b|ruby support|kotlin support|swift support|rust support|cpp support|c\\+\\+ support|erlang support|scala support|dart support|elixir support|\\brust\\b|\\bgolang\\b|\\bkotlin\\b|\\bswift\\b|\\bdart\\b|\\bscala\\b|\\belixir\\b|\\berlang\\b)",
+      "label": "question/coverage",
+      "close": true,
+      "reply": "We currently verify libraries across 15 ecosystems: Python (pip), JavaScript/TypeScript (npm), Ruby (gem), Go (mod), Java (Maven), C# (NuGet), PHP (composer), Rust (cargo), Kotlin, Swift, Dart, Scala, Elixir, C++, Erlang.\n\nLive coverage counts: <https://blackswan-software.ai/?tab=ecosystems>\n\nCoverage is uneven by ecosystem (Ruby/Java/Python are deepest; C++/Erlang are early). If your library isn't verified yet:\n\n```bash\ncygnus request <library>\n```\n\nPopular libs typically verify within days. Need priority? Email <hello@blackswan-software.ai> with your key prefix.\n\nClosing \u2014 reopen if you've requested a specific library that's been stuck for >7 days."
+    },
+    {
+      "name": "compare-vs-others",
+      "pattern": "(?i)(\\bvs\\b|\\bversus\\b|\\bcompare\\b|comparison|\\bsnyk\\b|\\bsocket\\b|\\bdependabot\\b|alternative to|alternative.*cygnus|difference between|why.*cygnus.*instead|how.*different.*from|github advanced security)",
+      "label": "question/compare",
+      "close": true,
+      "reply": "Cygnus runs alongside Snyk / Socket / Dependabot \u2014 it doesn't replace them. Most teams run multiple, since they catch different failure modes.\n\n**Short version:**\n\n- **Snyk / npm audit / Dependabot / GitHub Advanced Security** \u2014 CVE scanning. Pulls from public CVE databases. Catches disclosed vulnerabilities.\n- **Socket** \u2014 Behavioral heuristics + manifest analysis. Catches suspicious patterns (telephony, file-system access, sudden dependency churn).\n- **Cygnus** \u2014 Executes every exported function in an isolated sandbox, verifies behavior against documentation, signs the artifact. Catches behavioral drift and silent breaking changes that don't have CVEs yet \u2014 plus gives AI agents a verified-function reference so they don't hallucinate signatures.\n\nFull comparison table: <https://blackswan-software.ai/#compare>\n\nCygnus is additive \u2014 it's a verification gate on top of whatever scanner you already run. Lots of teams use Snyk for CVE coverage + Cygnus for behavioral verification.\n\nClosing \u2014 reopen with a specific 'how does Cygnus handle X vs Y' question if the table doesn't cover it."
+    },
+    {
+      "name": "how-secure-cygnus",
+      "pattern": "(?i)(how secure|is.*cygnus.*safe|trust.*cygnus|security model|threat model|how do.*trust|why should.*trust|security overview)",
+      "label": "question/security",
+      "close": false,
+      "reply": "Good question. Here's the security model in user-verifiable terms:\n\n**Binary integrity** \u2014 every CLI binary is published with a `.sha256` next to it. Verify yourself before running: <https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/>. Install script is ~140 lines of plain bash \u2014 `curl ... > install.sh && less install.sh` and read it before piping.\n\n**Artifact verification** \u2014 every library is executed in an isolated sandbox against its public documentation, graded, then signed with Ed25519. The signed artifact + SBOM is what `cygnus verify` checks on your machine. You can audit the signature without trusting our servers.\n\n**Transport** \u2014 Cloudflare-fronted (AOP + WAF + rate limiting). Verified tokens (paid tier) require an authenticated request.\n\n**Secrets handling** \u2014 API keys are stored as SHA-256 hashes (never plaintext). Internal secrets audit completed 2026-04-20: no real credentials in our git history.\n\n**Roadmap** \u2014 external audit is in our pre-Enterprise roadmap. If you're evaluating for regulated use, mention SOC2/HIPAA in your reply and we'll route to a contact.\n\nLeaving open so we can answer follow-ups."
+    },
+    {
+      "name": "library-not-registered",
+      "pattern": "(?i)(not.*in.*registry|library.*not.*registered|not yet.*verified|404.*lookup)",
+      "label": "request/library",
+      "close": false,
+      "reply": "Looks like the library isn't yet in the verification registry. You can request it:\n\n```bash\ncygnus request <library>\n```\n\nWe auto-compile + verify popular libraries within a few days, longer-tail can take longer. The issue you filed acts as a request \u2014 leaving open as a tracking ticket.\n\nNeed priority? Email <hello@blackswan-software.ai> with your key prefix and the library name."
+    }
+  ]
+}

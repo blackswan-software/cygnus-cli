@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cygnus-cli"
+version = "0.1.0"
+description = "Verified software supply chain — pre-compiled, signed, graded libraries"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Black Swan Software"}]
+urls = {Homepage = "https://blackswan-software.ai", Repository = "https://github.com/blackswan-software/cygnus-cli"}
+
+[project.scripts]
+cygnus = "cygnus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cygnus*"]
+
+[tool.setuptools]
+py-modules = []

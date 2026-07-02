@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: General questions
+    url: mailto:hello@blackswan-software.ai
+    about: For questions that aren't bugs or feature requests
+  - name: Security vulnerability
+    url: mailto:hello@blackswan-software.ai
+    about: Report security issues privately via email, not as a public issue

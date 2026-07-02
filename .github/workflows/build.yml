@@ -1,0 +1,151 @@
+name: Build CLI Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # PIN ubuntu-22.04 (GLIBC 2.35) — NOT ubuntu-latest. GitHub's
+          # ubuntu-latest is 24.04 (GLIBC 2.39) and the resulting binary
+          # won't load on Ubuntu 22.04 LTS, Debian 12, or older — most
+          # production servers. v0.1.0 shipped with GLIBC 2.38 and was
+          # effectively unrunnable on common server distros. 22.04 LTS
+          # runs through April 2027.
+          - os: ubuntu-22.04
+            arch: x86_64
+            target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            target: linux-arm64
+          # macos-13 (Intel Mac) REMOVED 2026-05-22. GitHub's macos-13 runner
+          # pool was stuck queued for >4h (Apple deprecated Intel in 2020;
+          # runners are scarce and being phased out). darwin-arm64 below
+          # covers >95% of macOS users. Re-add if Intel Mac demand justifies.
+          - os: macos-14
+            arch: arm64
+            target: darwin-arm64
+          - os: windows-latest
+            arch: x86_64
+            target: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build binary
+        shell: bash
+        run: |
+          python -m PyInstaller \
+            --onefile \
+            --name "cygnus-${{ matrix.target }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}" \
+            --strip \
+            --noupx \
+            --clean \
+            --noconfirm \
+            --log-level WARN \
+            cygnus/__main__.py
+
+      - name: Generate checksum (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd dist
+          # sha256sum exists on Linux; macOS only ships shasum. Use whichever is available.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+          else
+            shasum -a 256 cygnus-${{ matrix.target }} > cygnus-${{ matrix.target }}.sha256
+          fi
+
+      - name: Generate checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd dist
+          $hash = (Get-FileHash "cygnus-${{ matrix.target }}.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  cygnus-${{ matrix.target }}.exe" | Out-File -Encoding ascii "cygnus-${{ matrix.target }}.exe.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cygnus-${{ matrix.target }}
+          path: dist/cygnus-${{ matrix.target }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      - name: Upload binaries to DO Spaces CDN
+        # install.sh on install.blackswan-software.ai fetches from
+        # cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<version>/<binary>
+        # so GH Release alone isn't sufficient — also push to Spaces.
+        # Requires DO_SPACES_KEY / DO_SPACES_SECRET as repo secrets.
+        # Will skip if secrets aren't set (so non-secret-holders can still build).
+        env:
+          DO_SPACES_KEY: ${{ secrets.DO_SPACES_KEY }}
+          DO_SPACES_SECRET: ${{ secrets.DO_SPACES_SECRET }}
+        run: |
+          if [ -z "$DO_SPACES_KEY" ] || [ -z "$DO_SPACES_SECRET" ]; then
+            echo "DO_SPACES_KEY/SECRET not set — skipping Spaces upload."
+            echo "install.sh will continue to serve the prior version's binaries"
+            echo "from cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<old-version>/."
+            exit 0
+          fi
+          pip install --quiet 'awscli<2'
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials <<-EOF
+          [default]
+          aws_access_key_id = $DO_SPACES_KEY
+          aws_secret_access_key = $DO_SPACES_SECRET
+          EOF
+          # GITHUB_REF=refs/tags/v0.1.1 → TAG=v0.1.1, VERSION=0.1.1.
+          # We upload to BOTH cli/v0.1.1/ and cli/0.1.1/ because users
+          # naturally paste the GH tag name (v0.1.1) but earlier releases
+          # only published the v-stripped path (0.1.1). Caught 2026-05-29
+          # when v0.1.1 binaries 403'd at cli/v0.1.1/ until manually
+          # mirrored server-side. Writing both prefixes is idempotent and
+          # cheap — same dist/, two ~10MB syncs.
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          for PREFIX in "${TAG}" "${VERSION}"; do
+            echo "Uploading dist/* to s3://cygnus-registry/cli/${PREFIX}/"
+            aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
+              dist/ "s3://cygnus-registry/cli/${PREFIX}/" \
+              --acl public-read \
+              --no-progress
+          done
+          # Also push to cli/latest/ so install.sh + install.ps1 can default
+          # to "latest" and we don't have to ship a script edit on every
+          # release. The version-pinned paths stay for users who want them.
+          echo "Mirroring to s3://cygnus-registry/cli/latest/"
+          aws --endpoint-url https://sfo3.digitaloceanspaces.com s3 sync \
+            dist/ "s3://cygnus-registry/cli/latest/" \
+            --acl public-read \
+            --delete \
+            --no-progress

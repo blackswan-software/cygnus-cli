@@ -1,0 +1,101 @@
+name: Issue triage (regex FAQ)
+
+# Pure-regex auto-replies for the 5-6 most common user errors.
+# No LLM — free, deterministic, DDoS-resistant. Pattern table lives at
+# docs/issue-faq.json. Edit + commit to refine.
+#
+# Fires only on newly-opened issues (not comments) — bounds attack surface
+# (each issue = one workflow run, GitHub rate-limits issue creation).
+
+on:
+  issues:
+    types: [opened]
+
+# Bound concurrency so 100 spammed issues can't run 100 parallel jobs.
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Match issue against FAQ patterns
+        id: match
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { issue } = context.payload;
+            const haystack = `${issue.title || ''}\n${issue.body || ''}`;
+            const faqRaw = fs.readFileSync('docs/issue-faq.json', 'utf8');
+            const faq = JSON.parse(faqRaw);
+            for (const entry of faq.patterns) {
+              let re;
+              try {
+                re = new RegExp(entry.pattern);
+              } catch (e) {
+                core.warning(`Bad regex in entry "${entry.name}": ${e.message}`);
+                continue;
+              }
+              if (re.test(haystack)) {
+                core.info(`Matched pattern: ${entry.name}`);
+                core.setOutput('matched', 'true');
+                core.setOutput('name', entry.name);
+                core.setOutput('reply', entry.reply);
+                core.setOutput('label', entry.label || '');
+                core.setOutput('close', entry.close ? 'true' : 'false');
+                return;
+              }
+            }
+            core.info('No FAQ pattern matched — leaving issue for manual triage');
+            core.setOutput('matched', 'false');
+
+      - name: Comment + label + (maybe) close
+        if: steps.match.outputs.matched == 'true'
+        uses: actions/github-script@v7
+        env:
+          REPLY: ${{ steps.match.outputs.reply }}
+          LABEL: ${{ steps.match.outputs.label }}
+          CLOSE: ${{ steps.match.outputs.close }}
+          PATTERN_NAME: ${{ steps.match.outputs.name }}
+        with:
+          script: |
+            const { issue } = context.payload;
+            // Comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: process.env.REPLY + `\n\n<sub>_Auto-triaged via FAQ pattern \`${process.env.PATTERN_NAME}\`. If this is wrong, reopen + add a comment — a maintainer will review._</sub>`,
+            });
+            // Label
+            const label = process.env.LABEL;
+            if (label) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [label, 'auto-triaged'],
+                });
+              } catch (e) {
+                core.warning(`Could not add label "${label}": ${e.message}. Label may not exist on the repo yet.`);
+              }
+            }
+            // Close
+            if (process.env.CLOSE === 'true') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'not_planned',
+              });
+            }
