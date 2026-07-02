@@ -240,19 +240,23 @@ def _set_active_email(email: str) -> bool:
 
 
 def _add_account(email: str, api_key: str, tier: str = "free",
-                 label: str = "", email_verified: bool = False) -> None:
+                 label: str = "", email_verified: bool = False,
+                 refresh_token: str = "") -> None:
     """Add an account to the local store and set it as active.
     Overwrites any existing entry for the same email."""
     from datetime import datetime, timezone
     data = _load_accounts()
     accounts = data.get("accounts") or {}
-    accounts[email] = {
+    entry = {
         "api_key": api_key,
         "tier": tier,
         "label": label,
         "added": datetime.now(timezone.utc).isoformat(),
         "email_verified": email_verified,
     }
+    if refresh_token:
+        entry["refresh_token"] = refresh_token
+    accounts[email] = entry
     data["accounts"] = accounts
     data["active"] = email
     _save_accounts(data)
@@ -296,6 +300,15 @@ def _active_key_source() -> str:
     if email:
         return email
     return ""
+
+
+def _active_refresh_token() -> str:
+    """Return the refresh token for the active account, or empty string."""
+    data = _load_accounts()
+    email = data.get("active")
+    if not email:
+        return ""
+    return (data.get("accounts") or {}).get(email, {}).get("refresh_token", "")
 
 
 # ── Local Cache (per API key, 24h TTL) ────────────────────────────────────
@@ -382,9 +395,42 @@ _LOCKFILE_VERSIONS: dict[str, str] = {}
 # Last HTTP error code from _api() — lets callers distinguish 429 from 404
 _last_api_error: int | None = None
 
+def _try_refresh() -> bool:
+    """Attempt to exchange a stored refresh token for a new API key.
+    On success, updates config + global API_KEY. Returns True if refreshed."""
+    global API_KEY
+    rt = _active_refresh_token()
+    if not rt:
+        return False
+    email = _get_active_email()
+    if not email:
+        return False
+    try:
+        payload = json.dumps({"refresh_token": rt}).encode()
+        req = urllib.request.Request(
+            f"{REGISTRY_URL}/auth/refresh",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        new_key = data.get("api_key", "")
+        new_rt = data.get("refresh_token", "")
+        if not new_key:
+            return False
+        tier = data.get("tier", "free")
+        _add_account(email, new_key, tier=tier, refresh_token=new_rt)
+        API_KEY = new_key
+        return True
+    except Exception:
+        return False
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _api(path: str, use_cache: bool = True, quiet: bool = False) -> dict | None:
+def _api(path: str, use_cache: bool = True, quiet: bool = False,
+         _refreshed: bool = False) -> dict | None:
     """GET from registry API with local cache. Returns JSON or None on error.
 
     Cache hit → returns instantly (no API call, no rate limit impact).
@@ -448,12 +494,14 @@ def _api(path: str, use_cache: bool = True, quiet: bool = False) -> dict | None:
                 # Server didn't ship a detail — surface the same recovery
                 # path the auth-service would have included. Email-based
                 # ask-for-more is the documented monetization-readiness
-                # signal (see auth-service 429 handler).
+                # signal (see containers/auth/app/main.py 429 handler).
                 print(f"  Email hello@blackswan-software.ai with your key prefix for ongoing access.", file=sys.stderr)
             if retry_after:
                 print(f"  Resets in: {retry_after}s", file=sys.stderr)
             return None
         if e.code == 401:
+            if not _refreshed and _try_refresh():
+                return _api(path, use_cache=use_cache, quiet=quiet, _refreshed=True)
             if not quiet:
                 print(f"  Not authenticated. Run a command to set up.", file=sys.stderr)
             return None
@@ -1983,8 +2031,9 @@ def _ensure_auth():
 
     login_email = data.get("email", email)
     login_tier = data.get("tier", "free")
+    login_rt = data.get("refresh_token", "")
 
-    _add_account(login_email, new_key, tier=login_tier)
+    _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
 
     if is_new_account:
         _stamp_tos_local()
@@ -3175,6 +3224,7 @@ def cmd_auth_signup(args):
 
     api_key = data.get("api_key", "")
     tier = data.get("tier", "free")
+    rt = data.get("refresh_token", "")
 
     if not api_key:
         # Server didn't return key (race condition or web-only response)
@@ -3182,7 +3232,7 @@ def cmd_auth_signup(args):
         print(f"  {next_step}")
         return
 
-    _add_account(email, api_key, tier=tier)
+    _add_account(email, api_key, tier=tier, refresh_token=rt)
 
     cfg = _load_config()
     cfg["tos_accepted"] = True
@@ -3357,8 +3407,9 @@ def cmd_auth_login(args):
 
     login_email = data.get("email", email)
     login_tier = data.get("tier", "free")
+    login_rt = data.get("refresh_token", "")
 
-    _add_account(login_email, new_key, tier=login_tier)
+    _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
 
     if is_new_account:
         _stamp_tos_local()
@@ -3482,7 +3533,7 @@ def cmd_auth_status(args):
     print(f"  Registry: {REGISTRY_URL}")
 
     # Fetch usage from server. Field names match auth-service /auth/usage
-    # response shape (auth-service get_usage endpoint). Server-side
+    # response shape (containers/auth/app/main.py get_usage). Server-side
     # renames happened 2026-06-06: daily_used→daily_count, daily_remaining
     # →remaining_today, monthly_used→monthly_count. Prior CLI read the old
     # names and showed 0 / "?" silently — the field-name drift was invisible.
@@ -3798,10 +3849,11 @@ def cmd_auth_reset_key(args):
     cfg = _load_config()
     email = data.get("email", "") or cfg.get("email", "")
     tier = data.get("tier", "") or cfg.get("tier", "free")
+    rt = data.get("refresh_token", "")
 
     # Update multi-account store first (canonical path)
     if email:
-        _add_account(email, new_key, tier=tier)
+        _add_account(email, new_key, tier=tier, refresh_token=rt)
     else:
         # No email from server or config — legacy single-key fallback
         cfg["api_key"] = new_key
