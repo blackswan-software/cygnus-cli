@@ -15,14 +15,14 @@ curl -fsSL https://install.blackswan-software.ai | sh
 cygnus extension install vscode
 ```
 
-The extension reads `~/.cygnus/config.json` on activation, so a one-time
+The extension reads `~/.cyg/config.json` on activation, so a one-time
 `cygnus login` covers both the CLI and the extension. No manual paste
 into VS Code settings required.
 
 For a private build, point the installer at a local file:
 
 ```sh
-cygnus extension install vscode --vsix-file ./cygnus-0.1.0.vsix
+cygnus extension install vscode --vsix-file ./cygnus-0.2.1.vsix
 ```
 
 Or grab a `.vsix` directly from
@@ -55,7 +55,7 @@ The extension picks up your API key from, in order:
 
 1. `cygnus.apiKey` VS Code setting (explicit override)
 2. `CYGNUS_API_KEY` environment variable
-3. `~/.cygnus/config.json` `api_key` field — written by `cygnus login`
+3. `~/.cyg/config.json` `api_key` field — written by `cygnus login`
 4. Free tier (no key) — 100 lookups/day
 
 ## Supported Ecosystems
@@ -79,7 +79,7 @@ cd vscode-extension
 npm install
 npm run compile      # tsc → out/
 npm test             # @vscode/test-electron, 4 e2e tests
-npm run package      # vsce package → cygnus-0.1.0.vsix
+npm run package      # vsce package → cygnus-0.2.1.vsix
 ```
 
 The release workflow (`.github/workflows/build-vscode-extension.yml`)

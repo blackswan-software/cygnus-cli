@@ -68,8 +68,8 @@ Write-Host "  Cygnus CLI installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Get started:" -ForegroundColor Cyan
 Write-Host "    cygnus verify flask          # check a library"
-Write-Host "    cygnus signup                # create free account"
 Write-Host "    cygnus check                 # scan for CVEs"
+Write-Host "    cygnus status                # auth state + usage"
 Write-Host "    cygnus help                  # full command list"
 Write-Host ""
 Write-Host "  Free during launch. No card, no signup wall." -ForegroundColor DarkGray

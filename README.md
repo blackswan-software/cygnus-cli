@@ -68,7 +68,7 @@ Same binaries the script downloads. Verify SHA-256 before running.
 | macOS Apple Silicon | [cygnus-darwin-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64.sha256) |
 | Windows x86_64 | [cygnus-windows-x86_64.exe](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe.sha256) |
 
-Pin a specific version by swapping `latest` for `0.2.0`, etc. in the URL.
+Pin a specific version by swapping `latest` for `0.2.1`, etc. in the URL.
 
 Then:
 
