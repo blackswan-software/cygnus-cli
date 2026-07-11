@@ -125,8 +125,7 @@ fi
 # ── 4. Install ──────────────────────────────────────────────────────
 chmod +x "$TMPDIR/cygnus"
 mv "$TMPDIR/cygnus" "$INSTALL_DIR/cygnus"
-ln -sf cygnus "$INSTALL_DIR/cyg"
-ok "Installed to $INSTALL_DIR/cygnus (+ cyg symlink)"
+ok "Installed to $INSTALL_DIR/cygnus"
 
 # ── 5. Verify PATH ─────────────────────────────────────────────────
 if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
