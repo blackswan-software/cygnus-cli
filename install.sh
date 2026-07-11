@@ -24,7 +24,7 @@ set -eu
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
 
 INSTALL_DIR="${CYGNUS_INSTALL_DIR:-$HOME/.local/bin}"
-CDN_URL="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
+CDN_URL="https://cygnus-registry.sfo3.digitaloceanspaces.com/cli"
 # Default to "latest" so users always get the newest release without us
 # shipping install.sh edits on every version bump. Pin via
 # CYGNUS_VERSION=0.1.0 if you need a specific version. Each release uploads
@@ -44,8 +44,8 @@ if [ "${CYGNUS_NO_PREAMBLE:-}" != "1" ]; then
     printf "%b\n" "${BOLD}Cygnus CLI — installer${NC}"
     echo "─────────────────────────────────────────────────"
     printf "%b\n" "${BOLD}Will:${NC}"
-    echo "  • Download ~8 MB binary from cygnus-registry.sfo3.cdn.digitaloceanspaces.com"
-    echo "  • Verify SHA-256 against the published checksum (same CDN, separate file)"
+    echo "  • Download ~8 MB binary from cygnus-registry.sfo3.digitaloceanspaces.com"
+    echo "  • Verify SHA-256 against the published checksum (separate file)"
     echo "  • Install to ${INSTALL_DIR}/cygnus  (no sudo, no system changes)"
     echo ""
     printf "%b\n" "${BOLD}Won't:${NC}"
