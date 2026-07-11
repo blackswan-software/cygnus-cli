@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cygnus-cli"
-version = "0.2.3"
+version = "0.2.4"
 description = "Verified software supply chain — pre-compiled, signed, graded libraries"
 readme = "README.md"
 requires-python = ">=3.10"
