@@ -28,8 +28,18 @@ import urllib.error
 from pathlib import Path
 
 
+_opened_urls: set = set()
+
+
 def _open_browser(url: str) -> bool:
-    """Open URL in browser, suppressing GTK/snap stderr noise."""
+    """Open URL in browser, suppressing GTK/snap stderr noise.
+
+    Deduplicates within a process lifetime — calling with the same URL
+    twice is a no-op (prevents tab spam during consent flows).
+    """
+    if url in _opened_urls:
+        return True
+    _opened_urls.add(url)
     import webbrowser
     _devnull = open(os.devnull, "w")
     _old = os.dup(2)
@@ -65,8 +75,8 @@ def _validate_registry_url(url: str) -> str:
     HTTP allows a network attacker to inject malicious responses and
     poison the local cache. Localhost/file URLs are allowed for dev.
 
-    Without this check, CYGNUS_REGISTRY=http://... would silently downgrade
-    artifact + token fetch to plaintext HTTP.
+    Caught 2026-05-21 pen test: CYGNUS_REGISTRY=http://blackswan-software.ai
+    was silently accepted.
     """
     if url.startswith("https://") or url.startswith("file://"):
         return url
@@ -90,12 +100,13 @@ REGISTRY_URL = (
     if os.environ.get("CYGNUS_ALLOW_INSECURE") == "1"
     else _validate_registry_url(_raw_registry)
 )
-TOKEN_EXTRACTOR_URL = os.environ.get("CYGNUS_TOKEN_URL", REGISTRY_URL)
+TOKEN_EXTRACTOR_URL = os.environ.get("CYGNUS_TOKEN_EXTRACTOR", REGISTRY_URL)
 CONFIG_FILE = CYGNUS_HOME / "config.json"
 
 # Ecosystem allowlist. CLI flags that take --ecosystem must validate against
 # this set before constructing registry URLs. Prevents URL injection via the
-# ecosystem parameter. Prevents URL injection via arbitrary ecosystem strings.
+# ecosystem parameter (caught 2026-05-21 pen test M-2 — semicolon got through
+# to URL construction, was rejected by urllib but produced messy error).
 VALID_ECOSYSTEMS = frozenset({
     "python", "node", "go", "rust", "java", "csharp", "ruby",
     "php", "swift", "kotlin", "scala", "elixir", "zig", "cpp", "dart",
@@ -206,7 +217,8 @@ def _load_accounts() -> dict:
     if not api_key:
         return {"active": None, "accounts": {}}
     if not email:
-        # Older configs didn't cache email. Use a synthetic key as label.
+        # Pre-2026-06-06 configs didn't cache email. Use a synthetic
+        # key so the account still has a label.
         email = f"legacy-{hashlib.sha256(api_key.encode()).hexdigest()[:8]}@local"
     migrated = {
         "active": email,
@@ -469,7 +481,7 @@ def _api(path: str, use_cache: bool = True, quiet: bool = False,
             # Surface grace-credit info if the server granted one
             grace_used = resp.headers.get("X-Cygnus-Grace-Granted")
             grace_left = resp.headers.get("X-Cygnus-Grace-Remaining")
-            if grace_used:
+            if grace_used and not quiet:
                 print(
                     f"\n  Heads up: you're past the free daily limit. "
                     f"Grace used {grace_used} (remaining today: {grace_left}). "
@@ -485,30 +497,28 @@ def _api(path: str, use_cache: bool = True, quiet: bool = False,
         if e.code == 404:
             return None
         if e.code == 429:
-            # Prefer server's `detail` (includes tier-specific text + contact path)
-            detail_text = ""
-            try:
-                body = e.read().decode()
-                detail_text = json.loads(body).get("detail", "") if body else ""
-            except Exception:
-                pass
-            retry_after = None
-            try:
-                retry_after = e.headers.get("Retry-After")
-            except Exception:
-                pass
-            print(f"\n  Daily limit reached.", file=sys.stderr)
-            if detail_text:
-                # Server-provided detail wins — auth-service includes the
-                # support@blackswan-software.ai recovery path in its 429
-                # message text, plus tier-specific context.
-                print(f"  {detail_text}", file=sys.stderr)
-            else:
-                # Server didn't ship a detail — surface the same recovery
-                # Server didn't include a detail — surface the recovery path.
-                print(f"  Email support@blackswan-software.ai with your account email for ongoing access.", file=sys.stderr)
-            if retry_after:
-                print(f"  Resets in: {retry_after}s", file=sys.stderr)
+            if not quiet:
+                detail_text = ""
+                try:
+                    body = e.read().decode()
+                    detail_text = json.loads(body).get("detail", "") if body else ""
+                except Exception:
+                    pass
+                retry_after = None
+                try:
+                    retry_after = e.headers.get("Retry-After")
+                except Exception:
+                    pass
+                if detail_text and "daily" in detail_text.lower():
+                    print(f"\n  Daily limit reached.", file=sys.stderr)
+                else:
+                    print(f"\n  Rate limited — too many requests.", file=sys.stderr)
+                if detail_text:
+                    print(f"  {detail_text}", file=sys.stderr)
+                else:
+                    print(f"  Try again in a moment, or email support@blackswan-software.ai.", file=sys.stderr)
+                if retry_after:
+                    print(f"  Resets in: {retry_after}s", file=sys.stderr)
             return None
         if e.code == 401:
             if not _refreshed and _try_refresh():
@@ -526,7 +536,7 @@ def _api(path: str, use_cache: bool = True, quiet: bool = False,
 
 
 def _trigger_on_demand(ecosystem: str, library: str, version: str = "latest") -> dict | None:
-    """Request on-demand verification for a library. Returns result or None."""
+    """Trigger on-demand synthesis via test-runner endpoint. Returns result or None."""
     lib_encoded = library.replace("/", "__").replace(":", "__")
     url = f"{REGISTRY_URL}/synthesis/on-demand"
     payload = json.dumps({
@@ -947,7 +957,7 @@ def cmd_init(args):
 
     # Create directory structure. chmod 0700 so other local users can't
     # read the cache (which contains response data tied to the user's API
-    # key) or modify it (cache poisoning).
+    # key) or modify it (cache poisoning). Caught 2026-05-21 pen test M-1.
     CYGNUS_HOME.mkdir(parents=True, exist_ok=True)
     try:
         CYGNUS_HOME.chmod(0o700)
@@ -1017,10 +1027,10 @@ def _native_fallback(ecosystem: str, library: str, ci_mode: bool):
         return
     cmd = _NATIVE_INSTALL_CMD.get(ecosystem, "")
     if cmd:
+        import shlex
         import subprocess
-        full_cmd = f"{cmd} {library}"
-        print(f"  [ci] Falling back: {full_cmd}")
-        subprocess.run(full_cmd, shell=True, capture_output=True)
+        print(f"  [ci] Falling back: {cmd} {library}")
+        subprocess.run([*shlex.split(cmd), library], capture_output=True)
 
 
 def cmd_request(args):
@@ -1032,6 +1042,9 @@ def cmd_request(args):
     fire — the user just sees a confidence grade and no next action.
     `request` always enqueues with explicit feedback.
 
+    Surfaced 2026-06-05 fresh-user run: "documented `request` command
+    doesn't exist; `issue` fallback crashes — no path to the core
+    promise." Pinned by tests/test_cli.py::TestBypassedCommandsCanonical.
     """
     _check_tos()
     _check_balance()
@@ -1343,7 +1356,10 @@ def cmd_extension_install(args):
 
 
 def cmd_help(args):
-    """Print the full command list grouped by purpose."""
+    """Print the full command list grouped by purpose.
+
+    Pinned by tests/test_cli.py::TestCmdHelpGroupedScreen.
+    """
     print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
     sections = [
         ("Commands", [
@@ -1361,8 +1377,9 @@ def cmd_help(args):
             ("logout",     "Clear stored credentials"),
             ("forgot-key", "Reset your API key via email"),
             ("reset-key",  "Consume a reset token"),
-            ("cancel",     "Deactivate account"),
-            ("uninstall",  "Deactivate + remove all local data"),
+            ("cancel",     "Cancel paid subscription (keep account)"),
+            ("delete-account", "Delete account + all server data (GDPR)"),
+            ("uninstall",  "Cancel + remove all local data + binary"),
             ("list",       "Show installed artifacts"),
             ("lock",       "Generate cyg.lock"),
             ("sbom",       "Export CycloneDX SBOM"),
@@ -1601,66 +1618,81 @@ def cmd_lock(args):
     (node_modules, .venv, etc.). Use with --from-lock on verify/install.
     """
     _check_tos()
-    ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
-    deps = _parse_lockfile(ecosystem)
 
-    if not deps:
-        print(f"  No {ecosystem} dependencies found. Provide a lockfile.")
-        return
+    if args.ecosystem:
+        ecosystems = [args.ecosystem]
+    else:
+        ecosystems = _detect_all_ecosystems()
+        if not ecosystems:
+            eco = _load_config().get("ecosystem") or "python"
+            ecosystems = [eco]
 
-    print(f"  Generating cyg.lock for {len(deps)} {ecosystem} dependencies...\n")
+    all_entries = []
+    for ecosystem in ecosystems:
+        deps = _parse_lockfile(ecosystem)
+        if not deps:
+            continue
 
-    lock_entries = []
-    for lib in deps:
-        lib_encoded = lib.replace("/", "__").replace(":", "__")
-        pinned = _LOCKFILE_VERSIONS.get(lib)
-        if pinned:
-            ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/{pinned}")
-            if not ver_data:
-                lock_entries.append({
-                    "library": lib, "version": pinned, "ecosystem": ecosystem,
+        if len(ecosystems) > 1:
+            print(f"\n  ── {ecosystem.upper()} ({len(deps)} libraries) ──")
+        else:
+            print(f"  Generating cyg.lock for {len(deps)} {ecosystem} dependencies...\n")
+
+        for lib in deps:
+            lib_encoded = lib.replace("/", "__").replace(":", "__")
+            pinned = _LOCKFILE_VERSIONS.get(lib)
+            if pinned:
+                ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/{pinned}")
+                if not ver_data:
+                    all_entries.append({
+                        "library": lib, "version": pinned, "ecosystem": ecosystem,
+                        "confidence": "NOT_COMPILED", "tokens": 0, "signed": False, "cves": 0,
+                    })
+                    continue
+            else:
+                ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
+            version = ver_data.get("version", "") if ver_data else ""
+            if not version:
+                all_entries.append({
+                    "library": lib, "version": "unknown", "ecosystem": ecosystem,
                     "confidence": "NOT_COMPILED", "tokens": 0, "signed": False, "cves": 0,
                 })
                 continue
-        else:
-            ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
-        version = ver_data.get("version", "") if ver_data else ""
-        if not version:
-            lock_entries.append({
-                "library": lib, "version": "unknown", "ecosystem": ecosystem,
-                "confidence": "NOT_COMPILED", "tokens": 0, "signed": False, "cves": 0,
+
+            token_data = _api_ext(f"/tokens/{ecosystem}/{lib}/{version}")
+            token_count = token_data.get("token_count", 0) if token_data else 0
+            confidence = ver_data.get("confidence") or "ATTESTATION_ONLY"
+
+            manifest = _api(f"/manifest/{ecosystem}/{lib_encoded}/{version}")
+            signed = bool(manifest.get("cygnus_signature")) if manifest else False
+
+            provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
+            cve_count = len(provenance.get("advisories", [])) if provenance else 0
+
+            all_entries.append({
+                "library": lib, "version": version, "ecosystem": ecosystem,
+                "confidence": confidence, "tokens": token_count,
+                "signed": signed, "cves": cve_count,
             })
-            continue
 
-        token_data = _api_ext(f"/tokens/{ecosystem}/{lib}/{version}")
-        token_count = token_data.get("token_count", 0) if token_data else 0
-        confidence = ver_data.get("confidence") or "ATTESTATION_ONLY"
+    if not all_entries:
+        print("  No dependencies found. Provide a lockfile.")
+        return
 
-        manifest = _api(f"/manifest/{ecosystem}/{lib_encoded}/{version}")
-        signed = bool(manifest.get("cygnus_signature")) if manifest else False
-
-        provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
-        cve_count = len(provenance.get("advisories", [])) if provenance else 0
-
-        lock_entries.append({
-            "library": lib, "version": version, "ecosystem": ecosystem,
-            "confidence": confidence, "tokens": token_count,
-            "signed": signed, "cves": cve_count,
-        })
-
-    # Write cyg.lock
     lock_file = Path.cwd() / "cyg.lock"
+    eco_list = sorted(set(e["ecosystem"] for e in all_entries))
     lines = [
         f"# cyg.lock — generated {__import__('datetime').datetime.now().isoformat()}",
-        f"# ecosystem: {ecosystem}",
-        f"# deps: {len(lock_entries)}",
+        f"# ecosystems: {', '.join(eco_list)}",
+        f"# deps: {len(all_entries)}",
         "",
     ]
-    for e in sorted(lock_entries, key=lambda x: x["library"]):
+    for e in sorted(all_entries, key=lambda x: (x["ecosystem"], x["library"])):
         grade = _confidence_grade(e["confidence"]).strip()
         cve_flag = f" cves={e['cves']}" if e["cves"] > 0 else ""
         lines.append(
             f"{e['library']}=={e['version']}  "
+            f"ecosystem={e['ecosystem']}  "
             f"confidence={e['confidence']}  tokens={e['tokens']}  "
             f"signed={'yes' if e['signed'] else 'no'}  "
             f"grade={grade}{cve_flag}"
@@ -1668,14 +1700,14 @@ def cmd_lock(args):
 
     lock_file.write_text("\n".join(lines) + "\n")
 
-    fv = sum(1 for e in lock_entries if e["confidence"] == "FULLY_VERIFIED")
-    nc = sum(1 for e in lock_entries if e["confidence"] == "NOT_COMPILED")
-    cves = sum(e["cves"] for e in lock_entries)
+    fv = sum(1 for e in all_entries if e["confidence"] == "FULLY_VERIFIED")
+    nc = sum(1 for e in all_entries if e["confidence"] == "NOT_COMPILED")
+    cves = sum(e["cves"] for e in all_entries)
 
-    print(f"  Written: cyg.lock ({len(lock_entries)} deps)")
-    print(f"  Verified: {fv}/{len(lock_entries)}  Not compiled: {nc}")
+    print(f"  Written: cyg.lock ({len(all_entries)} deps across {len(eco_list)} ecosystem(s))")
+    print(f"  Verified: {fv}/{len(all_entries)}  Not compiled: {nc}")
     if cves:
-        print(f"  ⚠ {cves} known CVEs across {sum(1 for e in lock_entries if e['cves'] > 0)} packages")
+        print(f"  ⚠ {cves} known CVEs across {sum(1 for e in all_entries if e['cves'] > 0)} packages")
     print()
 
 
@@ -1686,47 +1718,58 @@ def cmd_sbom(args):
     and outputs a CycloneDX 1.5 JSON SBOM to stdout or file.
     """
     _check_tos()
-    ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
     output = getattr(args, "output", None)
-    deps = _parse_lockfile(ecosystem)
 
-    if not deps:
-        print("  No dependencies found. Provide a lockfile.")
-        return
+    if args.ecosystem:
+        ecosystems = [args.ecosystem]
+    else:
+        ecosystems = _detect_all_ecosystems()
+        if not ecosystems:
+            eco = _load_config().get("ecosystem") or "python"
+            ecosystems = [eco]
 
     components = []
-    for lib in deps:
-        lib_encoded = lib.replace("/", "__").replace(":", "__")
-        pinned = _LOCKFILE_VERSIONS.get(lib)
-        if pinned:
-            ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/{pinned}")
-            if not ver_data:
-                ver_data = None
-                version = pinned
+    for ecosystem in ecosystems:
+        deps = _parse_lockfile(ecosystem)
+        if not deps:
+            continue
+
+        for lib in deps:
+            lib_encoded = lib.replace("/", "__").replace(":", "__")
+            pinned = _LOCKFILE_VERSIONS.get(lib)
+            if pinned:
+                ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/{pinned}")
+                if not ver_data:
+                    ver_data = None
+                    version = pinned
+                else:
+                    version = ver_data.get("version", pinned)
             else:
-                version = ver_data.get("version", pinned)
-        else:
-            ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
-            version = ver_data.get("version", "unknown") if ver_data else "unknown"
+                ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
+                version = ver_data.get("version", "unknown") if ver_data else "unknown"
 
-        provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
-        advisories = provenance.get("advisories", []) if provenance else []
+            provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
+            advisories = provenance.get("advisories", []) if provenance else []
 
-        component = {
-            "type": "library",
-            "name": lib,
-            "version": version,
-            "purl": f"pkg:{ecosystem}/{lib}@{version}",
-            "properties": [
-                {"name": "cygnus:confidence", "value": ver_data.get("confidence", "ATTESTATION_ONLY") if ver_data else "NOT_COMPILED"},
-                {"name": "cygnus:ecosystem", "value": ecosystem},
-            ],
-        }
-        if advisories:
-            component["properties"].append(
-                {"name": "cygnus:cve_count", "value": str(len(advisories))}
-            )
-        components.append(component)
+            component = {
+                "type": "library",
+                "name": lib,
+                "version": version,
+                "purl": f"pkg:{ecosystem}/{lib}@{version}",
+                "properties": [
+                    {"name": "cygnus:confidence", "value": ver_data.get("confidence", "ATTESTATION_ONLY") if ver_data else "NOT_COMPILED"},
+                    {"name": "cygnus:ecosystem", "value": ecosystem},
+                ],
+            }
+            if advisories:
+                component["properties"].append(
+                    {"name": "cygnus:cve_count", "value": str(len(advisories))}
+                )
+            components.append(component)
+
+    if not components:
+        print("  No dependencies found. Provide a lockfile.")
+        return
 
     sbom = {
         "bomFormat": "CycloneDX",
@@ -1849,12 +1892,12 @@ def _stamp_tos_local():
 
 
 def _check_tos():
-    """Check that the user has accepted Terms of Service and Privacy Policy.
+    """Check TOS and Privacy acceptance — sequential: TOS first, then Privacy.
 
-    Acceptance happens on the webapp (signup or /terms page) and is
-    persisted server-side on the user account.  The CLI checks the
-    account flags via /auth/usage and caches the result locally so
-    subsequent commands don't need a network round-trip.
+    Each acceptance follows the same flow:
+      1. Open the page in browser (with token so webapp can POST back)
+      2. Poll /auth/usage until that flag is true
+      3. Fallback: CLI [y/N] prompt if browser round-trip times out
     """
     cfg = _load_config()
     if cfg.get("tos_accepted") and cfg.get("privacy_accepted"):
@@ -1875,7 +1918,6 @@ def _check_tos():
 
     # Non-TTY / piped use: never block on input()
     if os.environ.get("CYGNUS_ACCEPT_TOS") == "1":
-        # Stamp acceptance server-side
         try:
             payload = json.dumps({"tos_accepted": True, "privacy_accepted": True}).encode()
             req = urllib.request.Request(
@@ -1898,7 +1940,6 @@ def _check_tos():
 
     import time as _time
 
-    # Get a one-hour acceptance token so the web page can stamp this user
     accept_token = None
     try:
         req = urllib.request.Request(
@@ -1914,41 +1955,129 @@ def _check_tos():
         pass
 
     tos_url = "https://blackswan-software.ai/terms"
+    privacy_url = "https://blackswan-software.ai/privacy"
     if accept_token:
         tos_url += f"?t={accept_token}"
+        privacy_url += f"?t={accept_token}"
 
-    print("  ──────────────────────────────────────────")
-    print("  Please accept the Terms of Service and Privacy")
-    print("  Policy in your browser to continue.")
-    print()
-    try:
-        _open_browser(tos_url)
-        print(f"  Opened: {tos_url}")
-    except Exception:
-        print(f"  Open this link: {tos_url}")
-    print()
-    print("  Waiting for acceptance...", end="", flush=True)
+    # Already-accepted flags from the server check above
+    tos_done = isinstance(data, dict) and data.get("tos_accepted", False)
+    privacy_done = isinstance(data, dict) and data.get("privacy_accepted", False)
 
-    deadline = _time.time() + 120
-    while _time.time() < deadline:
+    # ── Step 1: Terms of Service ──
+    if not tos_done:
+        print("  ──────────────────────────────────────────")
+        print("  Step 1/2: Please review and accept the Terms of Service.")
+        print()
         try:
-            _time.sleep(3)
-            check = _api("/auth/usage", use_cache=False, quiet=True)
-            if isinstance(check, dict) and check.get("tos_accepted") and check.get("privacy_accepted"):
-                _stamp_tos_local()
-                print("\n  ✓ Accepted. Continuing...")
-                print("  ──────────────────────────────────────────")
-                return True
-            print(".", end="", flush=True)
-        except KeyboardInterrupt:
-            print("\n  Aborted.", file=sys.stderr)
-            sys.exit(1)
+            _open_browser(tos_url)
+        except Exception:
+            pass
+        print(f"  Terms of Service: {tos_url}")
+        print()
+        print("  Waiting for acceptance...", end="", flush=True)
 
-    print("\n  Timed out waiting for acceptance.")
-    print(f"  Accept at: {tos_url}")
-    print("  Then re-run your command.")
+        deadline = _time.time() + 60
+        while _time.time() < deadline:
+            try:
+                _time.sleep(3)
+                check = _api("/auth/usage", use_cache=False, quiet=True)
+                if isinstance(check, dict) and check.get("tos_accepted"):
+                    tos_done = True
+                    print("\n  ✓ Terms of Service accepted.")
+                    break
+                print(".", end="", flush=True)
+            except KeyboardInterrupt:
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+
+        if not tos_done:
+            print("\n")
+            print("  Browser acceptance didn't come through.")
+            print(f"  Terms of Service: {tos_url}")
+            print()
+            try:
+                answer = input("  Do you accept the Terms of Service? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+            if answer not in ("y", "yes"):
+                print("  Cannot continue without acceptance.")
+                sys.exit(1)
+            try:
+                payload = json.dumps({"tos_accepted": True}).encode()
+                req = urllib.request.Request(
+                    f"{REGISTRY_URL}/auth/accept-terms",
+                    data=payload, method="POST",
+                    headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+                )
+                if API_KEY:
+                    req.add_header("X-Api-Key", API_KEY)
+                urllib.request.urlopen(req, timeout=15)
+            except Exception:
+                pass
+            tos_done = True
+            print("  ✓ Terms of Service accepted.")
+
+    # ── Step 2: Privacy Policy ──
+    if not privacy_done:
+        print("  ──────────────────────────────────────────")
+        print("  Step 2/2: Please review and accept the Privacy Policy.")
+        print()
+        try:
+            _open_browser(privacy_url)
+        except Exception:
+            pass
+        print(f"  Privacy Policy: {privacy_url}")
+        print()
+        print("  Waiting for acceptance...", end="", flush=True)
+
+        deadline = _time.time() + 60
+        while _time.time() < deadline:
+            try:
+                _time.sleep(3)
+                check = _api("/auth/usage", use_cache=False, quiet=True)
+                if isinstance(check, dict) and check.get("privacy_accepted"):
+                    privacy_done = True
+                    print("\n  ✓ Privacy Policy accepted.")
+                    break
+                print(".", end="", flush=True)
+            except KeyboardInterrupt:
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+
+        if not privacy_done:
+            print("\n")
+            print("  Browser acceptance didn't come through.")
+            print(f"  Privacy Policy: {privacy_url}")
+            print()
+            try:
+                answer = input("  Do you accept the Privacy Policy? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+            if answer not in ("y", "yes"):
+                print("  Cannot continue without acceptance.")
+                sys.exit(1)
+            try:
+                payload = json.dumps({"privacy_accepted": True}).encode()
+                req = urllib.request.Request(
+                    f"{REGISTRY_URL}/auth/accept-terms",
+                    data=payload, method="POST",
+                    headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+                )
+                if API_KEY:
+                    req.add_header("X-Api-Key", API_KEY)
+                urllib.request.urlopen(req, timeout=15)
+            except Exception:
+                pass
+            privacy_done = True
+            print("  ✓ Privacy Policy accepted.")
+
+    _stamp_tos_local()
     print("  ──────────────────────────────────────────")
-    sys.exit(1)
+    print("  ✓ All accepted. Continuing...")
+    return True
 
 
 def _ensure_auth():
@@ -1969,9 +2098,12 @@ def _ensure_auth():
     if API_KEY:
         return
 
+    if _try_refresh():
+        return
+
     if not sys.stdin.isatty():
-        print("  Authentication required. Set CYGNUS_API_KEY or run interactively.", file=sys.stderr)
-        print("  Sign up: https://blackswan-software.ai", file=sys.stderr)
+        print("  Authentication required. Run `cyg login` in a terminal first.", file=sys.stderr)
+        print("  (CI/scripts: set CYGNUS_API_KEY env var instead)", file=sys.stderr)
         sys.exit(1)
 
     print("  Account required. Quick setup (30 seconds):")
@@ -2049,18 +2181,25 @@ def _ensure_auth():
 
     if is_new_account:
         tos_url = "https://blackswan-software.ai/terms"
+        privacy_url = "https://blackswan-software.ai/privacy"
         try:
             _open_browser(tos_url)
-            print(f"  Opened terms: {tos_url}")
+            print(f"  Opened Terms of Service: {tos_url}")
         except Exception:
-            print(f"  Terms: {tos_url}")
+            print(f"  Terms of Service: {tos_url}")
+        try:
+            _open_browser(privacy_url)
+            print(f"  Opened Privacy Policy: {privacy_url}")
+        except Exception:
+            print(f"  Privacy Policy: {privacy_url}")
+        print()
         try:
             accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\n  Aborted.", file=sys.stderr)
             sys.exit(1)
         if accept not in ("y", "yes"):
-            print("  Account creation requires accepting the Terms of Service.", file=sys.stderr)
+            print("  Account creation requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
             sys.exit(1)
 
         verify_payload = json.dumps({
@@ -2522,7 +2661,7 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
             return {"confidence": "NOT_FOUND"}
         print(f"  Queuing for compilation...")
         _queue_compilation(ecosystem, library)
-        print(f"  Run 'cyg verify {library}' again in ~5 minutes.")
+        print(f"  Queued. Run 'cyg verify {library}' again shortly to check progress.")
         return {"confidence": "NOT_COMPILED"}
 
     version = data["version"]
@@ -2536,13 +2675,13 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     advisories = cve.get("advisories", [])
     verify_url = data.get("verify_url")
 
-    # On-demand verification: if not FULLY_VERIFIED, trigger immediate check
+    # On-demand synthesis: if not FULLY_VERIFIED, trigger immediate verification
     if confidence not in ("FULLY_VERIFIED", "SECURITY_ISSUE_DETECTED"):
         print(f"\n  {ecosystem}/{library}@{version} — verifying...")
         synth_result = _trigger_on_demand(ecosystem, library, version)
         if synth_result and synth_result.get("confidence") == "FULLY_VERIFIED":
             confidence = "FULLY_VERIFIED"
-            print(f"  ✓ Verified! {synth_result.get('ok_count', 0)}/{synth_result.get('vectors_tested', 0)} tests passed")
+            print(f"  ✓ Verified! {synth_result.get('ok_count', 0)}/{synth_result.get('vectors_tested', 0)} vectors passed")
 
     # Display
     grade = _confidence_grade(confidence)
@@ -2929,7 +3068,14 @@ def _parse_lockfile(ecosystem: str) -> list[str]:
                     pass
 
     elif ecosystem == "cpp":
+        # 2026-06-05: cpp parse-lockfile branch was missing entirely. The
+        # ecosystem was listed in the detection table but without this
+        # branch _parse_lockfile returned [] and the user saw "No lockfile
+        # found" in any C++ project.
+        #
         # Priority: vcpkg.json > conanfile.txt > conanfile.py > CMakeLists.txt.
+        # vcpkg.json is the cleanest (structured JSON); the others are
+        # regex-grade fallbacks since arbitrary CMake can do anything.
         import re
         vcpkg = cwd / "vcpkg.json"
         if vcpkg.exists():
@@ -3189,7 +3335,7 @@ def _print_verify_summary(results: dict, ci_mode: bool):
 
 
 def _api_ext(path: str, use_cache: bool = True) -> dict | None:
-    """GET from token service with local cache. Returns JSON or None."""
+    """GET from token-extractor with local cache. Returns JSON or None."""
     if use_cache:
         cached = _cache_get(f"ext:{path}")
         if cached is not None:
@@ -3211,7 +3357,7 @@ def _api_ext(path: str, use_cache: bool = True) -> dict | None:
 
 
 def _api_ext_post(path: str, body: dict) -> dict | None:
-    """POST to token service (e.g., batch lookup). No caching."""
+    """POST to token-extractor (e.g., batch lookup). No caching."""
     url = f"{TOKEN_EXTRACTOR_URL}{path}"
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method="POST")
@@ -3286,11 +3432,17 @@ def cmd_auth_signup(args):
     print("  Terms of Service and Privacy Policy.")
     print()
     tos_url = "https://blackswan-software.ai/terms"
+    privacy_url = "https://blackswan-software.ai/privacy"
     try:
         _open_browser(tos_url)
-        print(f"  Opened in your browser: {tos_url}")
+        print(f"  Terms of Service: {tos_url}")
     except Exception:
-        print(f"  Read them here: {tos_url}")
+        print(f"  Terms of Service: {tos_url}")
+    try:
+        _open_browser(privacy_url)
+        print(f"  Privacy Policy:   {privacy_url}")
+    except Exception:
+        print(f"  Privacy Policy:   {privacy_url}")
     print()
     try:
         accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
@@ -3298,7 +3450,7 @@ def cmd_auth_signup(args):
         print("\n  Aborted.", file=sys.stderr)
         sys.exit(1)
     if accept not in ("y", "yes"):
-        print("  Signup requires accepting the Terms of Service.", file=sys.stderr)
+        print("  Signup requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
         sys.exit(1)
 
     # Step 4: POST /auth/web/signup-verify → create account + get key
@@ -3355,7 +3507,7 @@ def cmd_auth_signup(args):
 def cmd_auth_login(args):
     """Magic-link login: email a 6-digit code, paste it back, get authenticated.
 
-    Code-paste flow. The code is the primary surface (paste
+    Anthropic-style code-paste flow. The code is the primary surface (paste
     into terminal). The email also contains a convenience link, but the code
     is what authenticates. Key is rotated each login — that's the per-device
     isolation property without per-device complexity.
@@ -3364,6 +3516,25 @@ def cmd_auth_login(args):
       cyg login                          # prompts for email + code
       cyg login --email me@example.com   # skips email prompt
     """
+    # 021J: snapshot current config BEFORE any server call so a failed/aborted
+    # login never leaves the user worse off.  The server may invalidate the old
+    # key during /auth/login; if verify never completes we restore the snapshot.
+    _prior_config = None
+    if CONFIG_FILE.exists():
+        try:
+            _prior_config = CONFIG_FILE.read_text()
+        except OSError:
+            pass
+
+    def _restore_prior():
+        """Put back whatever was on disk before we started."""
+        if _prior_config is not None:
+            try:
+                CONFIG_FILE.write_text(_prior_config)
+                CONFIG_FILE.chmod(0o600)
+            except OSError:
+                pass
+
     # Step 1: email — from arg, cached config, or prompt
     cfg = _load_config()
     email = getattr(args, "email", None) or cfg.get("email", "")
@@ -3388,44 +3559,112 @@ def cmd_auth_login(args):
         print("  Error: valid email required.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: try signup first — 409 means existing, fall back to login.
-    # /auth/login always returns 200 (privacy-safe), so we can't use it
-    # to distinguish new vs existing accounts.
-    is_new_account = True
-    signup_payload = json.dumps({"email": email}).encode()
-    signup_req = urllib.request.Request(
-        f"{REGISTRY_URL}/auth/web/signup",
-        data=signup_payload, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
-    )
+    # Step 2–4 wrapped so ANY failure restores the prior config (021J).
+    _login_ok = False
     try:
-        with urllib.request.urlopen(signup_req, timeout=15) as resp:
-            json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 409:
-            is_new_account = False
-        else:
-            body = e.read().decode() if e.fp else ""
-            try:
-                detail = json.loads(body).get("detail", e.reason)
-            except Exception:
-                detail = e.reason
-            print(f"  Error: {detail}", file=sys.stderr)
-            sys.exit(1)
-    except Exception as e:
-        print(f"  Connection error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not is_new_account:
-        login_payload = json.dumps({"email": email}).encode()
-        login_req = urllib.request.Request(
-            f"{REGISTRY_URL}/auth/login",
-            data=login_payload, method="POST",
+        # Step 2: try signup first — 409 means existing, fall back to login.
+        is_new_account = True
+        signup_payload = json.dumps({"email": email}).encode()
+        signup_req = urllib.request.Request(
+            f"{REGISTRY_URL}/auth/web/signup",
+            data=signup_payload, method="POST",
             headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
         )
         try:
-            with urllib.request.urlopen(login_req, timeout=15) as resp:
+            with urllib.request.urlopen(signup_req, timeout=15) as resp:
                 json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                is_new_account = False
+            else:
+                body = e.read().decode() if e.fp else ""
+                try:
+                    detail = json.loads(body).get("detail", e.reason)
+                except Exception:
+                    detail = e.reason
+                print(f"  Error: {detail}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"  Connection error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if not is_new_account:
+            login_payload = json.dumps({"email": email}).encode()
+            login_req = urllib.request.Request(
+                f"{REGISTRY_URL}/auth/login",
+                data=login_payload, method="POST",
+                headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+            )
+            try:
+                with urllib.request.urlopen(login_req, timeout=15) as resp:
+                    json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                try:
+                    detail = json.loads(body).get("detail", e.reason)
+                except Exception:
+                    detail = e.reason
+                print(f"  Error: {detail}", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"  Connection error: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        print(f"  ✓ Code sent to {email}. Check your inbox.")
+
+        # Step 3: prompt for code (or accept via --code)
+        code = getattr(args, "code", None)
+        if not code:
+            try:
+                code = input("  Code: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+        if not code:
+            print("  Error: code required.", file=sys.stderr)
+            sys.exit(1)
+
+        # Step 4: verify code — signup-verify for new accounts, login-verify for existing
+        if is_new_account:
+            tos_url = "https://blackswan-software.ai/terms"
+            privacy_url = "https://blackswan-software.ai/privacy"
+            try:
+                _open_browser(tos_url)
+                print(f"  Terms of Service: {tos_url}")
+            except Exception:
+                print(f"  Terms of Service: {tos_url}")
+            try:
+                _open_browser(privacy_url)
+                print(f"  Privacy Policy:   {privacy_url}")
+            except Exception:
+                print(f"  Privacy Policy:   {privacy_url}")
+            print()
+            try:
+                accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\n  Aborted.", file=sys.stderr)
+                sys.exit(1)
+            if accept not in ("y", "yes"):
+                print("  Account creation requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
+                sys.exit(1)
+
+            verify_payload = json.dumps({
+                "email": email, "code": code,
+                "tos_accepted": True, "privacy_accepted": True,
+            }).encode()
+            verify_url = f"{REGISTRY_URL}/auth/web/signup-verify"
+        else:
+            verify_payload = json.dumps({"email": email, "code": code}).encode()
+            verify_url = f"{REGISTRY_URL}/auth/login-verify"
+
+        req = urllib.request.Request(
+            verify_url,
+            data=verify_payload, method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             body = e.read().decode() if e.fp else ""
             try:
@@ -3438,92 +3677,39 @@ def cmd_auth_login(args):
             print(f"  Connection error: {e}", file=sys.stderr)
             sys.exit(1)
 
-    print(f"  ✓ Code sent to {email}. Check your inbox.")
-
-    # Step 3: prompt for code (or accept via --code)
-    code = getattr(args, "code", None)
-    if not code:
-        try:
-            code = input("  Code: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\n  Aborted.", file=sys.stderr)
-            sys.exit(1)
-    if not code:
-        print("  Error: code required.", file=sys.stderr)
-        sys.exit(1)
-
-    # Step 4: verify code — signup-verify for new accounts, login-verify for existing
-    if is_new_account:
-        tos_url = "https://blackswan-software.ai/terms"
-        try:
-            _open_browser(tos_url)
-            print(f"  Opened in your browser: {tos_url}")
-        except Exception:
-            print(f"  Read them here: {tos_url}")
-        print()
-        try:
-            accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            print("\n  Aborted.", file=sys.stderr)
-            sys.exit(1)
-        if accept not in ("y", "yes"):
-            print("  Account creation requires accepting the Terms of Service.", file=sys.stderr)
+        new_key = data.get("api_key", "")
+        if not new_key:
+            next_step = data.get("next_step", "")
+            if next_step:
+                print(f"  {next_step}")
+            else:
+                print("  Error: server did not return a key.", file=sys.stderr)
             sys.exit(1)
 
-        verify_payload = json.dumps({
-            "email": email, "code": code,
-            "tos_accepted": True, "privacy_accepted": True,
-        }).encode()
-        verify_url = f"{REGISTRY_URL}/auth/web/signup-verify"
-    else:
-        verify_payload = json.dumps({"email": email, "code": code}).encode()
-        verify_url = f"{REGISTRY_URL}/auth/login-verify"
+        login_email = data.get("email", email)
+        login_tier = data.get("tier", "free")
+        login_rt = data.get("refresh_token", "")
 
-    req = urllib.request.Request(
-        verify_url,
-        data=verify_payload, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        try:
-            detail = json.loads(body).get("detail", e.reason)
-        except Exception:
-            detail = e.reason
-        print(f"  Error: {detail}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"  Connection error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
 
-    new_key = data.get("api_key", "")
-    if not new_key:
-        next_step = data.get("next_step", "")
-        if next_step:
-            print(f"  {next_step}")
+        if is_new_account:
+            _stamp_tos_local()
+
+        _login_ok = True
+        tier_name = data.get("tier_name") or login_tier.upper()
+        fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
+        if is_new_account:
+            print(f"\n  ✓ Account created! {login_email}  Tier: {tier_name}  Key: ...{fingerprint}")
         else:
-            print("  Error: server did not return a key.", file=sys.stderr)
-        sys.exit(1)
-
-    login_email = data.get("email", email)
-    login_tier = data.get("tier", "free")
-    login_rt = data.get("refresh_token", "")
-
-    _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
-
-    if is_new_account:
-        _stamp_tos_local()
-
-    tier_name = data.get("tier_name") or login_tier.upper()
-    fingerprint = hashlib.sha256(new_key.encode()).hexdigest()[:8]
-    if is_new_account:
-        print(f"\n  ✓ Account created! {login_email}  Tier: {tier_name}  Key: ...{fingerprint}")
-    else:
-        print(f"  ✓ Logged in as {login_email}. Tier: {tier_name}  Key: ...{fingerprint}")
-    print(f"  Credentials stored in {CONFIG_FILE}")
+            print(f"  ✓ Logged in as {login_email}. Tier: {tier_name}  Key: ...{fingerprint}")
+        print(f"  Credentials stored in {CONFIG_FILE}")
+    except SystemExit:
+        if not _login_ok:
+            _restore_prior()
+        raise
+    except KeyboardInterrupt:
+        _restore_prior()
+        sys.exit(130)
 
 
 def cmd_accounts(args):
@@ -3631,11 +3817,15 @@ def cmd_auth_status(args):
         label_disp = f" [{label}]" if label else ""
         print(f"  Active account: {active_email}{label_disp}")
         if len(accounts) > 1:
-            print(f"  ({len(accounts)} accounts on this machine)")
+            print(f"  ({len(accounts)} accounts on this machine — switch with `cyg login`)")
     print(f"  Key fingerprint: ...{fingerprint}")
     print(f"  Registry: {REGISTRY_URL}")
 
-    # Fetch usage from server.
+    # Fetch usage from server. Field names match auth-service /auth/usage
+    # response shape (containers/auth/app/main.py get_usage). Server-side
+    # renames happened 2026-06-06: daily_used→daily_count, daily_remaining
+    # →remaining_today, monthly_used→monthly_count. Prior CLI read the old
+    # names and showed 0 / "?" silently — the field-name drift was invisible.
     usage = _api("/auth/usage", use_cache=False)
     if usage:
         print(f"  Tier: {usage.get('tier', '?').upper()}")
@@ -3695,9 +3885,10 @@ def cmd_uninstall(args):
         print("  Aborted.")
         return
 
-    # Cancel subscription (best-effort)
+    # Cancel subscription — must succeed before wiping local auth
     cfg = _load_config()
     key = API_KEY or cfg.get("api_key", "")
+    cancel_ok = False
     if key:
         try:
             url = f"{REGISTRY_URL}/auth/billing/cancel"
@@ -3706,8 +3897,14 @@ def cmd_uninstall(args):
             req.add_header("X-API-Key", key)
             urllib.request.urlopen(req, timeout=15)
             print("  ✓ Subscription cancelled")
+            cancel_ok = True
         except Exception:
-            print("  ⚠ Could not reach server to cancel subscription — cancel manually at auth.blackswan-software.ai")
+            print("  ⚠ Could not reach server to cancel subscription.")
+            print("    Your API key is preserved so you can retry.")
+            print("    Cancel manually at auth.blackswan-software.ai, then re-run uninstall.")
+            return
+    else:
+        cancel_ok = True
 
     # Remove ~/.cyg/ (and legacy ~/.cygnus/ if it still exists)
     import shutil
@@ -3718,15 +3915,68 @@ def cmd_uninstall(args):
         shutil.rmtree(_OLD_HOME, ignore_errors=True)
         print(f"  ✓ Removed {_OLD_HOME}")
 
-    # Remove binary
-    binary = Path(sys.argv[0]).resolve()
-    try:
-        binary.unlink()
-        print(f"  ✓ Removed {binary}")
-    except Exception:
-        print(f"  ⚠ Could not remove {binary} — delete manually")
+    # Remove binary and symlink from install directory
+    install_dir = Path.home() / ".local" / "bin"
+    for name in ("cygnus", "cyg"):
+        p = install_dir / name
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+                print(f"  ✓ Removed {p}")
+        except Exception:
+            print(f"  ⚠ Could not remove {p} — delete manually")
 
     print("  Cygnus uninstalled. Thanks for trying it.")
+
+
+def cmd_delete_account(args):
+    """Delete your account and all server-side data (GDPR Art. 17)."""
+    cfg = _load_config()
+    key = API_KEY or cfg.get("api_key", "")
+    if not key:
+        print("  Not authenticated. Run any command to set up.")
+        return
+
+    print("  ⚠ This will PERMANENTLY delete your account and all data:")
+    print("    - Profile, usage history, API keys")
+    print("    - Stored tokens and synthesis results")
+    print("    - Subscription (if any)")
+    print()
+    print("  This action cannot be undone.")
+    confirm = input("  Type DELETE to confirm: ").strip()
+    if confirm != "DELETE":
+        print("  Aborted. Account not deleted.")
+        return
+
+    try:
+        url = f"{REGISTRY_URL}/auth/delete-account"
+        req = urllib.request.Request(url, data=b"", method="POST")
+        req.add_header("User-Agent", "cygnus-cli/1.0")
+        req.add_header("X-API-Key", key)
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read())
+        print("  ✓ Account deleted from server.")
+        removed = result.get("removed", [])
+        if removed:
+            print(f"    Removed: {', '.join(removed)}")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print("  ⚠ API key is invalid or already deleted.")
+        elif e.code == 404:
+            print("  ⚠ Account not found on server (may have been deleted already).")
+        else:
+            print(f"  ⚠ Server error ({e.code}) — try again or contact support@blackswan-software.ai")
+            return
+    except Exception:
+        print("  ⚠ Could not reach server — try again later.")
+        return
+
+    import shutil
+    if CYG_HOME.exists():
+        shutil.rmtree(CYG_HOME, ignore_errors=True)
+        print(f"  ✓ Removed local data ({CYG_HOME})")
+
+    print("  Account deletion complete.")
 
 
 def cmd_auth_cancel(args):
@@ -3864,8 +4114,11 @@ def cmd_auth_forgot_key(args):
         with urllib.request.urlopen(req, timeout=15) as resp:
             json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        # Cloudflare WAF can return 403 on valid POSTs.
-        # Surface the recovery path explicitly.
+        # BUG 2 fix (2026-06-06): graceful 403/429/connection error
+        # handling. The Cloudflare WAF can return 403 on perfectly-
+        # formed POSTs (UA fingerprinting, IP deny-list, etc.) — a
+        # one-word "Forbidden" is a dead end for the user. Surface
+        # the support@ recovery path explicitly.
         if e.code in (403, 429):
             print(f"  Recovery email request was blocked at the edge "
                   f"(HTTP {e.code}).", file=sys.stderr)
@@ -3980,7 +4233,10 @@ def cmd_auth(args):
     elif subcmd == "reset-key":
         cmd_auth_reset_key(args)
     else:
-        # Fallback for unrecognized auth subcommand.
+        # Dead code: `auth` is no longer a registered subcommand
+        # (post-2026-06-06 flatten). argparse rejects `cygnus auth`
+        # before reaching this branch. Strings updated to flat command
+        # names anyway, in case anything routes here via deprecated path.
         print("Usage: cygnus <signup|login|status|logout|cancel|forgot-key|reset-key>")
         print("  signup       — create a free account")
         print("  login        — authenticate with existing API key")
@@ -4028,6 +4284,77 @@ def cmd_cache(args):
         print(f"  TTL:        {CACHE_TTL}s ({CACHE_TTL // 3600}h)")
     else:
         print("  Usage: cyg cache [clear|status]")
+
+
+# ── Admin Commands (owner-only, hidden) ─────────────────────────────
+
+
+def _require_founder_env() -> str:
+    key = os.environ.get("CYGNUS_ADMIN_KEY", "")
+    if not key:
+        print("  Error: CYGNUS_ADMIN_KEY env var required for admin commands.", file=sys.stderr)
+        print("  Export CYGNUS_ADMIN_KEY=<your-founder-key> and retry.", file=sys.stderr)
+        sys.exit(1)
+    return key
+
+
+def _admin_api(method: str, path: str, body: dict | None = None) -> dict | None:
+    auth_url = os.environ.get("CYGNUS_AUTH_URL", "https://auth.blackswan-software.ai")
+    founder_key = _require_founder_env()
+    url = f"{auth_url}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("User-Agent", "cygnus-cli/1.0")
+    req.add_header("X-Api-Key", founder_key)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode()).get("detail", e.reason)
+        except Exception:
+            detail = e.reason
+        print(f"  Error ({e.code}): {detail}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"  Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_admin(args):
+    sub = getattr(args, "admin_command", None)
+    if sub == "setup-2fa":
+        cmd_admin_setup_2fa(args)
+    else:
+        print("  Usage: cyg admin setup-2fa")
+        print("  All user management is in the dashboard USERS tab.")
+
+
+def cmd_admin_setup_2fa(args):
+    """One-time TOTP enrollment for dashboard admin actions."""
+    data = _admin_api("POST", "/auth/admin/totp/setup", {})
+    if not data:
+        return
+    secret = data.get("secret", "")
+    uri = data.get("provisioning_uri", "")
+    print("\n  TOTP Enrollment")
+    print("  ─────────────────────────────────────")
+    print(f"  Secret: {secret}")
+    print(f"\n  Provisioning URI (scan as QR or paste into authenticator):")
+    print(f"  {uri}")
+    print()
+    code = input("  Enter code from authenticator app: ").strip()
+    if not code:
+        print("  Cancelled.", file=sys.stderr)
+        sys.exit(1)
+    result = _admin_api("POST", "/auth/admin/totp/verify-setup", {"code": code})
+    if result and result.get("enrolled"):
+        print("  TOTP enrolled. Use your authenticator app for dashboard admin actions.")
+    else:
+        print("  Verification failed — check your authenticator app and retry.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _first_run_onboarding():
@@ -4156,7 +4483,11 @@ def cmd_issue(args):
       2. Fallback: print a github.com URL with the body pre-filled
     """
     import platform
-    import subprocess
+    import subprocess  # BUG 5 (2026-06-06): module-level subprocess
+                       # import was removed in an earlier refactor;
+                       # cmd_issue's $EDITOR + gh fallback paths use
+                       # subprocess.run/SubprocessError. Without this
+                       # import the function NameError'd on every call.
     import urllib.parse
 
     email = _get_user_email()
@@ -4305,7 +4636,8 @@ def _main_inner():
     p_add.add_argument("--ci", action="store_true", help="CI mode: fall back to native package manager if artifact unavailable, never prompt, exit 0")
     p_add.add_argument("--no-cache", action="store_true", help="Bypass local cache")
 
-    sub.add_parser("list", help=argparse.SUPPRESS)
+    p_list = sub.add_parser("list", help=argparse.SUPPRESS)
+    p_list.add_argument("--ecosystem", "-e", default=None, help="Ecosystem (default: auto-detect)")
     p_check = sub.add_parser("check", help="CVE scan (free, no account needed)")
     p_check.add_argument("library", nargs="?", default=None, help="Library name (or scan all from lockfile)")
     p_check.add_argument("--ecosystem", "-e", default=None, help="Ecosystem (default: auto-detect)")
@@ -4327,9 +4659,17 @@ def _main_inner():
     p_verify.add_argument("--from-lock", action="store_true", help="Verify from cyg.lock (no native lockfile needed)")
     p_verify.add_argument("--no-cache", action="store_true", help="Bypass local cache")
 
-    # Account lifecycle — flat top-level commands.
+    # Account lifecycle — flat top-level commands (2026-06-06 flatten).
+    # The nested `cygnus auth X` namespace was removed in favor of
+    # discoverable top-level cmds. Renamed `forgot-key`/`reset-key`
+    # → `forgot-key`/`reset-key` to drop the dashes per operator decision.
     p_signup = sub.add_parser("signup", help=argparse.SUPPRESS)
-    # Free tier only during launch period.
+    # NB: free-period launch — `--tier` accepts only `free` in the
+    # public surface. Internal code still handles verified/enterprise
+    # so server-side promotion works; the argparse choices list is
+    # the public contract and shows only the free option. Add the
+    # other tier choices back when paid tiers launch + the
+    # TestNoPaywallRefsInFreePeriod pin is lifted.
     p_signup.add_argument("--tier", choices=["free"], default="free",
                           help="Account tier (free during launch)")
     p_login = sub.add_parser("login", help=argparse.SUPPRESS)
@@ -4348,6 +4688,7 @@ def _main_inner():
     )
     p_userkey.add_argument("token", help="The one-time token from the reset email")
 
+    sub.add_parser("delete-account", help=argparse.SUPPRESS)
     sub.add_parser("uninstall", help=argparse.SUPPRESS)
 
     p_cache = sub.add_parser("cache", help=argparse.SUPPRESS)
@@ -4417,6 +4758,11 @@ def _main_inner():
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
 
+    # `cyg admin <subcommand>` — owner-only, hidden
+    p_admin = sub.add_parser("admin", help=argparse.SUPPRESS)
+    admin_sub = p_admin.add_subparsers(dest="admin_command")
+    admin_sub.add_parser("setup-2fa", help="Enroll TOTP for dashboard admin")
+
     # Intercept legacy flags before argparse — redirect to subcommands
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
         print(f"cyg {_cli_version}")
@@ -4472,6 +4818,8 @@ def _main_inner():
         cmd_auth_reset_key(args)
     elif args.command == "cache":
         cmd_cache(args)
+    elif args.command == "delete-account":
+        cmd_delete_account(args)
     elif args.command == "uninstall":
         cmd_uninstall(args)
     elif args.command == "account":
@@ -4484,6 +4832,8 @@ def _main_inner():
         cmd_deposit(args)
     elif args.command == "extension":
         cmd_extension(args)
+    elif args.command == "admin":
+        cmd_admin(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
