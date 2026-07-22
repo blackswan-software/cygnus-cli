@@ -29,7 +29,7 @@ CDN_URL="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
 # shipping install.sh edits on every version bump. Pin via
 # CYGNUS_VERSION=0.1.0 if you need a specific version. Each release uploads
 # binaries to BOTH cli/<version>/ and cli/latest/ (see build.yml release job).
-CLI_VERSION="${CYGNUS_VERSION:-0.2.4}"
+CLI_VERSION="${CYGNUS_VERSION:-latest}"
 
 info()  { printf "%b\n" "${CYAN}cygnus${NC} $*"; }
 ok()    { printf "%b\n" "${GREEN}  ✓${NC} $*"; }
@@ -45,7 +45,7 @@ if [ "${CYGNUS_NO_PREAMBLE:-}" != "1" ]; then
     echo "─────────────────────────────────────────────────"
     printf "%b\n" "${BOLD}Will:${NC}"
     echo "  • Download ~8 MB binary from cygnus-registry.sfo3.cdn.digitaloceanspaces.com"
-    echo "  • Verify SHA-256 against the published checksum (separate file)"
+    echo "  • Verify SHA-256 against the published checksum (same CDN, separate file)"
     echo "  • Install to ${INSTALL_DIR}/cygnus  (no sudo, no system changes)"
     echo ""
     printf "%b\n" "${BOLD}Won't:${NC}"
@@ -119,13 +119,14 @@ if curl -fsSL "$CHECKSUM_URL" -o "$TMPDIR/checksum" 2>/dev/null; then
     fi
     ok "Checksum verified"
 else
-    info "Checksum not available — skipping verification"
+    fail "Checksum not available — refusing to install unverified binary"
 fi
 
 # ── 4. Install ──────────────────────────────────────────────────────
 chmod +x "$TMPDIR/cygnus"
 mv "$TMPDIR/cygnus" "$INSTALL_DIR/cygnus"
-ok "Installed to $INSTALL_DIR/cygnus"
+ln -sf cygnus "$INSTALL_DIR/cyg"
+ok "Installed to $INSTALL_DIR/cygnus (+ cyg symlink)"
 
 # ── 5. Verify PATH ─────────────────────────────────────────────────
 if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
@@ -149,7 +150,7 @@ echo "    cygnus help                  # full command list"
 echo ""
 printf "%b\n" "  ${DIM}Free during launch. No card, no signup wall.${NC}"
 printf "%b\n" "  ${DIM}Daily quota + 3 free grace credits if you hit the cap.${NC}"
-printf "%b\n" "  ${DIM}Need more? Email hello@blackswan-software.ai with your key prefix.${NC}"
+printf "%b\n" "  ${DIM}Need more? Email support@blackswan-software.ai with your key prefix.${NC}"
 echo ""
 printf "%b\n" "  ${DIM}Docs: https://blackswan-software.ai${NC}"
 # innocent change
