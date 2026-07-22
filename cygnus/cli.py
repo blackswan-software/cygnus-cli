@@ -2690,7 +2690,8 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     print(f"  Confidence:  {confidence} {grade}")
     print(f"  Tokens:      {token_count} verified function signatures" if token_count else "  Tokens:      not extracted yet")
     if functions:
-        print(f"  Functions:   {', '.join(functions[:5])}")
+        names = [f["function"] if isinstance(f, dict) else f for f in functions[:5]]
+        print(f"  Functions:   {', '.join(names)}")
         if len(functions) > 5:
             print(f"               ... and {len(functions) - 5} more")
     if signed:
