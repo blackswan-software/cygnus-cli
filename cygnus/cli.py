@@ -1964,6 +1964,8 @@ def _check_tos():
     tos_done = isinstance(data, dict) and data.get("tos_accepted", False)
     privacy_done = isinstance(data, dict) and data.get("privacy_accepted", False)
 
+    tos_accepted_via_browser = False
+
     # ── Step 1: Terms of Service ──
     if not tos_done:
         print("  ──────────────────────────────────────────")
@@ -1984,6 +1986,7 @@ def _check_tos():
                 check = _api("/auth/usage", use_cache=False, quiet=True)
                 if isinstance(check, dict) and check.get("tos_accepted"):
                     tos_done = True
+                    tos_accepted_via_browser = True
                     print("\n  ✓ Terms of Service accepted.")
                     break
                 print(".", end="", flush=True)
@@ -2024,10 +2027,11 @@ def _check_tos():
         print("  ──────────────────────────────────────────")
         print("  Step 2/2: Please review and accept the Privacy Policy.")
         print()
-        try:
-            _open_browser(privacy_url)
-        except Exception:
-            pass
+        if not tos_accepted_via_browser:
+            try:
+                _open_browser(privacy_url)
+            except Exception:
+                pass
         print(f"  Privacy Policy: {privacy_url}")
         print()
         print("  Waiting for acceptance...", end="", flush=True)
