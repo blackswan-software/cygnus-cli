@@ -1506,7 +1506,7 @@ def cmd_install(args):
 
     # Build download URL — try CDN first, fall back to proxy if CDN is private (403)
     if not cdn_url or cdn_url.endswith("manifest.json"):
-        cdn_url = f"https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/artifacts/{ecosystem}/{safe_lib}/{version}/{target_key}/{filename}"
+        cdn_url = f"https://cdn.blackswan-software.ai/artifacts/{ecosystem}/{safe_lib}/{version}/{target_key}/{filename}"
     proxy_url = f"{REGISTRY_URL}/artifact/{ecosystem}/{safe_lib}/{version}/{target_key}/{filename}?proxy=true"
 
     if not filename or filename == "manifest.json":
@@ -2591,7 +2591,7 @@ def _check_artifact_signature(ecosystem: str, library: str, version: str) -> dic
         return {"verified": False, "error": "No artifact filename in manifest"}
 
     # Download artifact bytes — try CDN first, fall back to proxy if 403 (private ACL)
-    cdn_url = f"https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/artifacts/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}"
+    cdn_url = f"https://cdn.blackswan-software.ai/artifacts/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}"
     proxy_url = f"{REGISTRY_URL}/artifact/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}?proxy=true"
     artifact_data = None
     for url in (cdn_url, proxy_url):

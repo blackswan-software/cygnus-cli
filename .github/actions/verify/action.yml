@@ -44,7 +44,7 @@ runs:
       run: |
         set -euo pipefail
         BIN="${RUNNER_TEMP}/cygnus"
-        BASE="https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
+        BASE="https://cdn.blackswan-software.ai/cli"
         URL="${BASE}/${VERSION}/cygnus-${TARGET}"
         echo "Fetching ${URL}"
         curl -fL --max-time 120 -o "${BIN}" "${URL}" \

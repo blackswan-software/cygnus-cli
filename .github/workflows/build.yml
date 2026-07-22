@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload binaries to DO Spaces CDN
         # install.sh on install.blackswan-software.ai fetches from
-        # cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<version>/<binary>
+        # cdn.blackswan-software.ai/cli/<version>/<binary>
         # so GH Release alone isn't sufficient — also push to Spaces.
         # Requires DO_SPACES_KEY / DO_SPACES_SECRET as repo secrets.
         # Will skip if secrets aren't set (so non-secret-holders can still build).
@@ -114,7 +114,7 @@ jobs:
           if [ -z "$DO_SPACES_KEY" ] || [ -z "$DO_SPACES_SECRET" ]; then
             echo "DO_SPACES_KEY/SECRET not set — skipping Spaces upload."
             echo "install.sh will continue to serve the prior version's binaries"
-            echo "from cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/<old-version>/."
+            echo "from cdn.blackswan-software.ai/cli/<old-version>/."
             exit 0
           fi
           pip install --quiet 'awscli<2'

@@ -63,10 +63,10 @@ Same binaries the script downloads. Verify SHA-256 before running.
 
 | Platform | Binary | Checksum |
 |---|---|---|
-| Linux x86_64 | [cygnus-linux-x86_64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-x86_64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-x86_64.sha256) |
-| Linux arm64 | [cygnus-linux-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-linux-arm64.sha256) |
-| macOS Apple Silicon | [cygnus-darwin-arm64](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-darwin-arm64.sha256) |
-| Windows x86_64 | [cygnus-windows-x86_64.exe](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe) | [.sha256](https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli/latest/cygnus-windows-x86_64.exe.sha256) |
+| Linux x86_64 | [cygnus-linux-x86_64](https://cdn.blackswan-software.ai/cli/latest/cygnus-linux-x86_64) | [.sha256](https://cdn.blackswan-software.ai/cli/latest/cygnus-linux-x86_64.sha256) |
+| Linux arm64 | [cygnus-linux-arm64](https://cdn.blackswan-software.ai/cli/latest/cygnus-linux-arm64) | [.sha256](https://cdn.blackswan-software.ai/cli/latest/cygnus-linux-arm64.sha256) |
+| macOS Apple Silicon | [cygnus-darwin-arm64](https://cdn.blackswan-software.ai/cli/latest/cygnus-darwin-arm64) | [.sha256](https://cdn.blackswan-software.ai/cli/latest/cygnus-darwin-arm64.sha256) |
+| Windows x86_64 | [cygnus-windows-x86_64.exe](https://cdn.blackswan-software.ai/cli/latest/cygnus-windows-x86_64.exe) | [.sha256](https://cdn.blackswan-software.ai/cli/latest/cygnus-windows-x86_64.exe.sha256) |
 
 Pin a specific version by swapping `latest` for `0.2.1`, etc. in the URL.
 
@@ -92,7 +92,7 @@ pip install -e .
 
 ## What the install does
 
-- Downloads ~8 MB binary from `cygnus-registry.sfo3.cdn.digitaloceanspaces.com`
+- Downloads ~8 MB binary from `cdn.blackswan-software.ai`
 - Verifies SHA-256 against the published checksum
 - Installs to `~/.local/bin/cygnus` (no `sudo`, no system changes)
 - Does NOT modify `~/.bashrc`, `~/.zshrc`, or any shell startup file (prints PATH hint instead)

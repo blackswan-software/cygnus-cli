@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$CDN = "https://cygnus-registry.sfo3.cdn.digitaloceanspaces.com/cli"
+$CDN = "https://cdn.blackswan-software.ai/cli"
 # Default to "latest" so install.ps1 doesn't need a release-bump edit
 # every version. Pin via $env:CYGNUS_VERSION. CI uploads to both
 # cli/<version>/ and cli/latest/.
