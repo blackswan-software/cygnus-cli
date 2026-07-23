@@ -1892,12 +1892,12 @@ def _stamp_tos_local():
 
 
 def _check_tos():
-    """Check TOS and Privacy acceptance — sequential: TOS first, then Privacy.
+    """Check TOS and Privacy acceptance via browser round-trip.
 
-    Each acceptance follows the same flow:
-      1. Open the page in browser (with token so webapp can POST back)
-      2. Poll /auth/usage until that flag is true
-      3. Fallback: CLI [y/N] prompt if browser round-trip times out
+    Opens both Terms and Privacy pages. User accepts on the web pages
+    (which POST to the auth backend / database). CLI verifies acceptance
+    against the DB before proceeding. If user quits, returns False so
+    the caller can clean up (delete account if new signup).
     """
     cfg = _load_config()
     if cfg.get("tos_accepted") and cfg.get("privacy_accepted"):
@@ -1938,8 +1938,7 @@ def _check_tos():
         print("Run 'cyg' once interactively, or set CYGNUS_ACCEPT_TOS=1", file=sys.stderr)
         sys.exit(1)
 
-    import time as _time
-
+    # Get accept token so the web pages can POST acceptance back to the DB
     accept_token = None
     try:
         req = urllib.request.Request(
@@ -1960,128 +1959,72 @@ def _check_tos():
         tos_url += f"?t={accept_token}"
         privacy_url += f"?t={accept_token}"
 
-    # Already-accepted flags from the server check above
-    tos_done = isinstance(data, dict) and data.get("tos_accepted", False)
-    privacy_done = isinstance(data, dict) and data.get("privacy_accepted", False)
+    # Open both pages — user accepts on each web page
+    print("  ──────────────────────────────────────────")
+    print("  Please accept the Terms of Service and Privacy Policy")
+    print("  in your browser to continue.")
+    print()
+    print(f"  Terms of Service: {tos_url}")
+    print(f"  Privacy Policy:   {privacy_url}")
+    print()
+    try:
+        _open_browser(tos_url)
+    except Exception:
+        pass
+    try:
+        _open_browser(privacy_url)
+    except Exception:
+        pass
 
-    tos_accepted_via_browser = False
+    # Loop: user confirms they've accepted, we verify against the DB
+    while True:
+        try:
+            choice = input("  Press Enter after accepting both (or q to quit): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.", file=sys.stderr)
+            return False
+        if choice in ("q", "quit"):
+            return False
 
-    # ── Step 1: Terms of Service ──
-    if not tos_done:
-        print("  ──────────────────────────────────────────")
-        print("  Step 1/2: Please review and accept the Terms of Service.")
+        # Verify against the database
+        check = _api("/auth/usage", use_cache=False, quiet=True)
+        tos_ok = isinstance(check, dict) and check.get("tos_accepted", False)
+        priv_ok = isinstance(check, dict) and check.get("privacy_accepted", False)
+
+        if tos_ok and priv_ok:
+            _stamp_tos_local()
+            print("  ──────────────────────────────────────────")
+            print("  ✓ Terms of Service and Privacy Policy accepted.")
+            return True
+
+        # Tell the user what's still missing
+        missing = []
+        if not tos_ok:
+            missing.append("Terms of Service")
+        if not priv_ok:
+            missing.append("Privacy Policy")
+        print(f"  Not yet accepted: {', '.join(missing)}")
+        print("  Please click 'Accept' on each page in your browser.")
         print()
         try:
-            _open_browser(tos_url)
-        except Exception:
-            pass
-        print(f"  Terms of Service: {tos_url}")
+            retry = input("  [r] Re-open pages  [q] Quit: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.", file=sys.stderr)
+            return False
+        if retry in ("q", "quit"):
+            return False
+        if retry in ("r", "reopen"):
+            if not tos_ok:
+                try:
+                    _open_browser(tos_url)
+                except Exception:
+                    pass
+            if not priv_ok:
+                try:
+                    _open_browser(privacy_url)
+                except Exception:
+                    pass
         print()
-        print("  Waiting for acceptance...", end="", flush=True)
-
-        deadline = _time.time() + 60
-        while _time.time() < deadline:
-            try:
-                _time.sleep(3)
-                check = _api("/auth/usage", use_cache=False, quiet=True)
-                if isinstance(check, dict) and check.get("tos_accepted"):
-                    tos_done = True
-                    tos_accepted_via_browser = True
-                    print("\n  ✓ Terms of Service accepted.")
-                    break
-                print(".", end="", flush=True)
-            except KeyboardInterrupt:
-                print("\n  Aborted.", file=sys.stderr)
-                sys.exit(1)
-
-        if not tos_done:
-            print("\n")
-            print("  Browser acceptance didn't come through.")
-            print(f"  Terms of Service: {tos_url}")
-            print()
-            try:
-                answer = input("  Do you accept the Terms of Service? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("\n  Aborted.", file=sys.stderr)
-                sys.exit(1)
-            if answer not in ("y", "yes"):
-                print("  Cannot continue without acceptance.")
-                sys.exit(1)
-            try:
-                payload = json.dumps({"tos_accepted": True}).encode()
-                req = urllib.request.Request(
-                    f"{REGISTRY_URL}/auth/accept-terms",
-                    data=payload, method="POST",
-                    headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
-                )
-                if API_KEY:
-                    req.add_header("X-Api-Key", API_KEY)
-                urllib.request.urlopen(req, timeout=15)
-            except Exception:
-                pass
-            tos_done = True
-            print("  ✓ Terms of Service accepted.")
-
-    # ── Step 2: Privacy Policy ──
-    if not privacy_done:
-        print("  ──────────────────────────────────────────")
-        print("  Step 2/2: Please review and accept the Privacy Policy.")
-        print()
-        if not tos_accepted_via_browser:
-            try:
-                _open_browser(privacy_url)
-            except Exception:
-                pass
-        print(f"  Privacy Policy: {privacy_url}")
-        print()
-        print("  Waiting for acceptance...", end="", flush=True)
-
-        deadline = _time.time() + 60
-        while _time.time() < deadline:
-            try:
-                _time.sleep(3)
-                check = _api("/auth/usage", use_cache=False, quiet=True)
-                if isinstance(check, dict) and check.get("privacy_accepted"):
-                    privacy_done = True
-                    print("\n  ✓ Privacy Policy accepted.")
-                    break
-                print(".", end="", flush=True)
-            except KeyboardInterrupt:
-                print("\n  Aborted.", file=sys.stderr)
-                sys.exit(1)
-
-        if not privacy_done:
-            print("\n")
-            print("  Browser acceptance didn't come through.")
-            print(f"  Privacy Policy: {privacy_url}")
-            print()
-            try:
-                answer = input("  Do you accept the Privacy Policy? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("\n  Aborted.", file=sys.stderr)
-                sys.exit(1)
-            if answer not in ("y", "yes"):
-                print("  Cannot continue without acceptance.")
-                sys.exit(1)
-            try:
-                payload = json.dumps({"privacy_accepted": True}).encode()
-                req = urllib.request.Request(
-                    f"{REGISTRY_URL}/auth/accept-terms",
-                    data=payload, method="POST",
-                    headers={"Content-Type": "application/json", "User-Agent": "cygnus-cli/1.0"},
-                )
-                if API_KEY:
-                    req.add_header("X-Api-Key", API_KEY)
-                urllib.request.urlopen(req, timeout=15)
-            except Exception:
-                pass
-            privacy_done = True
-            print("  ✓ Privacy Policy accepted.")
-
-    _stamp_tos_local()
-    print("  ──────────────────────────────────────────")
-    print("  ✓ All accepted. Continuing...")
-    return True
 
 
 def _ensure_auth():
@@ -2184,28 +2127,7 @@ def _ensure_auth():
         sys.exit(1)
 
     if is_new_account:
-        tos_url = "https://blackswan-software.ai/terms"
-        privacy_url = "https://blackswan-software.ai/privacy"
-        try:
-            _open_browser(tos_url)
-        except Exception:
-            pass
-        print(f"  Terms of Service: {tos_url}")
-        print(f"  Privacy Policy:   {privacy_url}")
-        print()
-        try:
-            accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            print("\n  Aborted.", file=sys.stderr)
-            sys.exit(1)
-        if accept not in ("y", "yes"):
-            print("  Account creation requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
-            sys.exit(1)
-
-        verify_payload = json.dumps({
-            "email": email, "code": code,
-            "tos_accepted": True, "privacy_accepted": True,
-        }).encode()
+        verify_payload = json.dumps({"email": email, "code": code}).encode()
         verify_url = f"{REGISTRY_URL}/auth/web/signup-verify"
     else:
         verify_payload = json.dumps({"email": email, "code": code}).encode()
@@ -2245,10 +2167,6 @@ def _ensure_auth():
     login_rt = data.get("refresh_token", "")
 
     _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
-
-    if is_new_account:
-        _stamp_tos_local()
-
     API_KEY = new_key
 
     tier_name = data.get("tier_name") or login_tier.upper()
@@ -2258,6 +2176,26 @@ def _ensure_auth():
     else:
         print(f"  ✓ Authenticated as {login_email}. Tier: {tier_name}  Key: ...{fingerprint}")
     print()
+
+    if is_new_account:
+        accepted = _check_tos()
+        if not accepted:
+            print()
+            print("  Account requires Terms of Service and Privacy Policy acceptance.")
+            print("  Removing account...")
+            try:
+                del_req = urllib.request.Request(
+                    f"{REGISTRY_URL}/auth/delete-account",
+                    data=b"", method="POST",
+                    headers={"User-Agent": "cygnus-cli/1.0", "X-API-Key": new_key},
+                )
+                urllib.request.urlopen(del_req, timeout=15)
+            except Exception:
+                pass
+            _remove_account(login_email)
+            API_KEY = ""
+            print("  Account removed. Run `cyg login` to try again.")
+            sys.exit(1)
 
 
 def _check_balance():
@@ -3517,6 +3455,7 @@ def cmd_auth_login(args):
       cyg login                          # prompts for email + code
       cyg login --email me@example.com   # skips email prompt
     """
+    global API_KEY
     # 021J: snapshot current config BEFORE any server call so a failed/aborted
     # login never leaves the user worse off.  The server may invalidate the old
     # key during /auth/login; if verify never completes we restore the snapshot.
@@ -3627,28 +3566,7 @@ def cmd_auth_login(args):
 
         # Step 4: verify code — signup-verify for new accounts, login-verify for existing
         if is_new_account:
-            tos_url = "https://blackswan-software.ai/terms"
-            privacy_url = "https://blackswan-software.ai/privacy"
-            try:
-                _open_browser(tos_url)
-            except Exception:
-                pass
-            print(f"  Terms of Service: {tos_url}")
-            print(f"  Privacy Policy:   {privacy_url}")
-            print()
-            try:
-                accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                print("\n  Aborted.", file=sys.stderr)
-                sys.exit(1)
-            if accept not in ("y", "yes"):
-                print("  Account creation requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
-                sys.exit(1)
-
-            verify_payload = json.dumps({
-                "email": email, "code": code,
-                "tos_accepted": True, "privacy_accepted": True,
-            }).encode()
+            verify_payload = json.dumps({"email": email, "code": code}).encode()
             verify_url = f"{REGISTRY_URL}/auth/web/signup-verify"
         else:
             verify_payload = json.dumps({"email": email, "code": code}).encode()
@@ -3688,9 +3606,7 @@ def cmd_auth_login(args):
         login_rt = data.get("refresh_token", "")
 
         _add_account(login_email, new_key, tier=login_tier, refresh_token=login_rt)
-
-        if is_new_account:
-            _stamp_tos_local()
+        API_KEY = new_key
 
         _login_ok = True
         tier_name = data.get("tier_name") or login_tier.upper()
@@ -3700,6 +3616,30 @@ def cmd_auth_login(args):
         else:
             print(f"  ✓ Logged in as {login_email}. Tier: {tier_name}  Key: ...{fingerprint}")
         print(f"  Credentials stored in {CONFIG_FILE}")
+
+        # New accounts: TOS + Privacy acceptance via browser round-trip.
+        # The web page POSTs acceptance to the database — CLI just polls.
+        if is_new_account:
+            print()
+            accepted = _check_tos()
+            if not accepted:
+                print()
+                print("  Account requires Terms of Service and Privacy Policy acceptance.")
+                print("  Removing account...")
+                try:
+                    del_req = urllib.request.Request(
+                        f"{REGISTRY_URL}/auth/delete-account",
+                        data=b"", method="POST",
+                        headers={"User-Agent": "cygnus-cli/1.0", "X-API-Key": new_key},
+                    )
+                    urllib.request.urlopen(del_req, timeout=15)
+                except Exception:
+                    pass
+                _remove_account(login_email)
+                API_KEY = ""
+                _login_ok = False
+                print("  Account removed. Run `cyg login` to try again.")
+                sys.exit(1)
     except SystemExit:
         if not _login_ok:
             _restore_prior()
