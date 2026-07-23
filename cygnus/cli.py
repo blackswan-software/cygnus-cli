@@ -1807,7 +1807,7 @@ def cmd_check(args):
     if library:
         if "==" in library:
             library, pin_version = library.split("==", 1)
-        elif "@" in library and ecosystem in ("node", "go", "rust"):
+        elif "@" in library:
             library, pin_version = library.rsplit("@", 1)
         deps = [library]
         if pin_version:
@@ -2240,10 +2240,12 @@ def cmd_verify(args):
     ci_mode = getattr(args, "ci", False)
     show_cve = getattr(args, "cve", False)
 
-    # Version pinning: "requests==2.31.0" → library="requests", pin_version="2.31.0"
+    # Version pinning: "requests==2.31.0" or "requests@2.31.0"
     pin_version = None
     if library and "==" in library:
         library, pin_version = library.split("==", 1)
+    elif library and "@" in library:
+        library, pin_version = library.rsplit("@", 1)
 
     from_lock = getattr(args, "from_lock", False)
 
