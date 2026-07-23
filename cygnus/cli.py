@@ -1995,6 +1995,7 @@ def _check_tos():
             _stamp_tos_local()
             print("  ──────────────────────────────────────────")
             print("  ✓ Terms of Service and Privacy Policy accepted.")
+            print("  You can close the Terms and Privacy tabs in your browser.")
             return True
 
         # Tell the user what's still missing
@@ -3365,38 +3366,8 @@ def cmd_auth_signup(args):
         print("  Error: code required.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 3: TOS + Privacy acceptance (required before account creation)
-    print()
-    print("  Before creating your account, please review the")
-    print("  Terms of Service and Privacy Policy.")
-    print()
-    tos_url = "https://blackswan-software.ai/terms"
-    privacy_url = "https://blackswan-software.ai/privacy"
-    try:
-        _open_browser(tos_url)
-        print(f"  Terms of Service: {tos_url}")
-    except Exception:
-        print(f"  Terms of Service: {tos_url}")
-    try:
-        _open_browser(privacy_url)
-        print(f"  Privacy Policy:   {privacy_url}")
-    except Exception:
-        print(f"  Privacy Policy:   {privacy_url}")
-    print()
-    try:
-        accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        print("\n  Aborted.", file=sys.stderr)
-        sys.exit(1)
-    if accept not in ("y", "yes"):
-        print("  Signup requires accepting the Terms of Service and Privacy Policy.", file=sys.stderr)
-        sys.exit(1)
-
-    # Step 4: POST /auth/web/signup-verify → create account + get key
-    payload = json.dumps({
-        "email": email, "code": code,
-        "tos_accepted": True, "privacy_accepted": True,
-    }).encode()
+    # Step 3: POST /auth/web/signup-verify → create account + get key
+    payload = json.dumps({"email": email, "code": code}).encode()
     req = urllib.request.Request(
         f"{REGISTRY_URL}/auth/web/signup-verify",
         data=payload, method="POST",
@@ -3427,17 +3398,35 @@ def cmd_auth_signup(args):
         print(f"  {next_step}")
         return
 
+    global API_KEY
     _add_account(email, api_key, tier=tier, refresh_token=rt)
-
-    cfg = _load_config()
-    cfg["tos_accepted"] = True
-    cfg["privacy_accepted"] = True
-    _save_config(cfg)
+    API_KEY = api_key
 
     print(f"\n  Account created!")
     print(f"  Email: {email}")
     print(f"  Tier:  {tier.upper()}")
     print(f"\n  Saved to {CYGNUS_HOME / 'config.json'}")
+
+    # TOS + Privacy acceptance via browser round-trip
+    accepted = _check_tos()
+    if not accepted:
+        print()
+        print("  Account requires Terms of Service and Privacy Policy acceptance.")
+        print("  Removing account...")
+        try:
+            del_req = urllib.request.Request(
+                f"{REGISTRY_URL}/auth/delete-account",
+                data=b"", method="POST",
+                headers={"User-Agent": "cygnus-cli/1.0", "X-API-Key": api_key},
+            )
+            urllib.request.urlopen(del_req, timeout=15)
+        except Exception:
+            pass
+        _remove_account(email)
+        API_KEY = ""
+        print("  Account removed. Run `cyg signup` to try again.")
+        sys.exit(1)
+
     print(f"\n  Start using:")
     print(f"    cyg verify")
     print(f"    cyg add flask")
@@ -4226,72 +4215,8 @@ def cmd_cache(args):
 # ── Admin Commands (owner-only, hidden) ─────────────────────────────
 
 
-def _require_founder_env() -> str:
-    key = os.environ.get("CYGNUS_ADMIN_KEY", "")
-    if not key:
-        print("  Error: CYGNUS_ADMIN_KEY env var required for admin commands.", file=sys.stderr)
-        print("  Export CYGNUS_ADMIN_KEY=<your-founder-key> and retry.", file=sys.stderr)
-        sys.exit(1)
-    return key
 
 
-def _admin_api(method: str, path: str, body: dict | None = None) -> dict | None:
-    auth_url = os.environ.get("CYGNUS_AUTH_URL", "https://auth.blackswan-software.ai")
-    founder_key = _require_founder_env()
-    url = f"{auth_url}{path}"
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("User-Agent", "cygnus-cli/1.0")
-    req.add_header("X-Api-Key", founder_key)
-    if data:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode()).get("detail", e.reason)
-        except Exception:
-            detail = e.reason
-        print(f"  Error ({e.code}): {detail}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"  Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def cmd_admin(args):
-    sub = getattr(args, "admin_command", None)
-    if sub == "setup-2fa":
-        cmd_admin_setup_2fa(args)
-    else:
-        print("  Usage: cyg admin setup-2fa")
-        print("  All user management is in the dashboard USERS tab.")
-
-
-def cmd_admin_setup_2fa(args):
-    """One-time TOTP enrollment for dashboard admin actions."""
-    data = _admin_api("POST", "/auth/admin/totp/setup", {})
-    if not data:
-        return
-    secret = data.get("secret", "")
-    uri = data.get("provisioning_uri", "")
-    print("\n  TOTP Enrollment")
-    print("  ─────────────────────────────────────")
-    print(f"  Secret: {secret}")
-    print(f"\n  Provisioning URI (scan as QR or paste into authenticator):")
-    print(f"  {uri}")
-    print()
-    code = input("  Enter code from authenticator app: ").strip()
-    if not code:
-        print("  Cancelled.", file=sys.stderr)
-        sys.exit(1)
-    result = _admin_api("POST", "/auth/admin/totp/verify-setup", {"code": code})
-    if result and result.get("enrolled"):
-        print("  TOTP enrolled. Use your authenticator app for dashboard admin actions.")
-    else:
-        print("  Verification failed — check your authenticator app and retry.", file=sys.stderr)
-        sys.exit(1)
 
 
 def _first_run_onboarding():
@@ -4695,10 +4620,6 @@ def _main_inner():
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
 
-    # `cyg admin <subcommand>` — owner-only, hidden
-    p_admin = sub.add_parser("admin", help=argparse.SUPPRESS)
-    admin_sub = p_admin.add_subparsers(dest="admin_command")
-    admin_sub.add_parser("setup-2fa", help="Enroll TOTP for dashboard admin")
 
     # Intercept legacy flags before argparse — redirect to subcommands
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
@@ -4769,8 +4690,6 @@ def _main_inner():
         cmd_deposit(args)
     elif args.command == "extension":
         cmd_extension(args)
-    elif args.command == "admin":
-        cmd_admin(args)
     else:
         # First-run experience: no command → onboarding
         _first_run_onboarding()
