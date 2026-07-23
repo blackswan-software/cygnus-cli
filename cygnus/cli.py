@@ -2184,8 +2184,14 @@ def _ensure_auth():
         sys.exit(1)
 
     if is_new_account:
-        print(f"  Terms of Service: https://blackswan-software.ai/terms")
-        print(f"  Privacy Policy:   https://blackswan-software.ai/privacy")
+        tos_url = "https://blackswan-software.ai/terms"
+        privacy_url = "https://blackswan-software.ai/privacy"
+        try:
+            _open_browser(tos_url)
+        except Exception:
+            pass
+        print(f"  Terms of Service: {tos_url}")
+        print(f"  Privacy Policy:   {privacy_url}")
         print()
         try:
             accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
@@ -3621,8 +3627,14 @@ def cmd_auth_login(args):
 
         # Step 4: verify code — signup-verify for new accounts, login-verify for existing
         if is_new_account:
-            print(f"  Terms of Service: https://blackswan-software.ai/terms")
-            print(f"  Privacy Policy:   https://blackswan-software.ai/privacy")
+            tos_url = "https://blackswan-software.ai/terms"
+            privacy_url = "https://blackswan-software.ai/privacy"
+            try:
+                _open_browser(tos_url)
+            except Exception:
+                pass
+            print(f"  Terms of Service: {tos_url}")
+            print(f"  Privacy Policy:   {privacy_url}")
             print()
             try:
                 accept = input("  I accept the Terms of Service and Privacy Policy [y/N]: ").strip().lower()
