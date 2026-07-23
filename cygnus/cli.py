@@ -393,6 +393,60 @@ def _cache_set(path: str, payload: dict):
         pass  # Cache write failure is non-fatal
 
 
+def _artifact_cache_dir() -> Path:
+    d = CYGNUS_HOME / "artifacts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _artifact_cache_get(sha256_hex: str) -> bytes | None:
+    p = _artifact_cache_dir() / sha256_hex
+    if not p.exists():
+        return None
+    data = p.read_bytes()
+    if hashlib.sha256(data).hexdigest() == sha256_hex:
+        return data
+    p.unlink(missing_ok=True)
+    return None
+
+
+def _artifact_cache_set(sha256_hex: str, data: bytes):
+    try:
+        (_artifact_cache_dir() / sha256_hex).write_bytes(data)
+    except OSError:
+        pass
+
+
+def _download_artifact_bytes(ecosystem: str, library: str, version: str,
+                             manifest: dict) -> bytes | None:
+    """Download artifact bytes from CDN or proxy. Returns None on failure."""
+    lib_encoded = library.replace("/", "__").replace(":", "__")
+    filename = manifest.get("filename", "")
+    target_key = "universal"
+    if not filename or filename == "manifest.json":
+        for target, info in manifest.get("artifacts", {}).items():
+            fn = info.get("filename", "")
+            if fn and fn != "manifest.json":
+                filename = fn
+                target_key = target
+                break
+    if not filename or filename == "manifest.json":
+        return None
+
+    cdn_url = f"https://cdn.blackswan-software.ai/artifacts/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}"
+    proxy_url = f"{REGISTRY_URL}/artifact/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}?proxy=true"
+    for url in (cdn_url, proxy_url):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "cygnus-cli/1.0"})
+            if API_KEY:
+                req.add_header("X-API-Key", API_KEY)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read()
+        except Exception:
+            continue
+    return None
+
+
 # Env var takes precedence over stored config. Multi-account aware via
 # _active_api_key (v0.1.13): falls through to the active account from
 # ~/.cyg/config.json when CYGNUS_API_KEY is not set.
@@ -1409,20 +1463,20 @@ def cmd_install(args):
 
     # Handle --from-lock
     if getattr(args, "from_lock", False):
-        deps = _parse_cygnus_lock()
-        if not deps:
+        lock_entries = _parse_cygnus_lock()
+        if not lock_entries:
             print("  No cyg.lock found. Run 'cyg lock' first.")
             return
         ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
         installed = 0
         fallen_back = 0
-        print(f"  Installing {len(deps)} libraries from cyg.lock...")
-        for lib in deps:
-            args.library = lib
+        print(f"  Installing {len(lock_entries)} libraries from cyg.lock...")
+        for entry in lock_entries:
+            args.library = entry["library"]
             args.version = "latest"
             cmd_install(args)
         if ci_mode:
-            print(f"\n  [ci] Summary: {len(deps)} libraries processed")
+            print(f"\n  [ci] Summary: {len(lock_entries)} libraries processed")
         return
 
     library = args.library
@@ -1664,16 +1718,30 @@ def cmd_lock(args):
             confidence = ver_data.get("confidence") or "ATTESTATION_ONLY"
 
             manifest = _api(f"/manifest/{ecosystem}/{lib_encoded}/{version}")
-            signed = bool(manifest.get("cygnus_signature")) if manifest else False
+            sig_data = manifest.get("cygnus_signature", {}) if manifest else {}
+            signed = bool(sig_data and sig_data.get("signature"))
 
             provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
             cve_count = len(provenance.get("advisories", [])) if provenance else 0
 
-            all_entries.append({
+            entry = {
                 "library": lib, "version": version, "ecosystem": ecosystem,
                 "confidence": confidence, "tokens": token_count,
                 "signed": signed, "cves": cve_count,
-            })
+            }
+
+            if signed and manifest:
+                artifact_data = _download_artifact_bytes(ecosystem, lib, version, manifest)
+                if artifact_data:
+                    sha = hashlib.sha256(artifact_data).hexdigest()
+                    entry["sha256"] = sha
+                    entry["signature"] = sig_data["signature"]
+                    keys = _fetch_signing_keys()
+                    if keys and keys.get("current", {}).get("key_id"):
+                        entry["key_id"] = keys["current"]["key_id"]
+                    _artifact_cache_set(sha, artifact_data)
+
+            all_entries.append(entry)
 
     if not all_entries:
         print("  No dependencies found. Provide a lockfile.")
@@ -1683,19 +1751,27 @@ def cmd_lock(args):
     eco_list = sorted(set(e["ecosystem"] for e in all_entries))
     lines = [
         f"# cyg.lock — generated {__import__('datetime').datetime.now().isoformat()}",
+        f"# format: 2",
         f"# ecosystems: {', '.join(eco_list)}",
         f"# deps: {len(all_entries)}",
         "",
     ]
     for e in sorted(all_entries, key=lambda x: (x["ecosystem"], x["library"])):
         grade = _confidence_grade(e["confidence"]).strip()
-        cve_flag = f" cves={e['cves']}" if e["cves"] > 0 else ""
+        cve_flag = f"  cves={e['cves']}" if e["cves"] > 0 else ""
+        integrity = ""
+        if e.get("sha256"):
+            integrity += f"  sha256={e['sha256']}"
+        if e.get("signature"):
+            integrity += f"  signature={e['signature']}"
+        if e.get("key_id"):
+            integrity += f"  key_id={e['key_id']}"
         lines.append(
             f"{e['library']}=={e['version']}  "
             f"ecosystem={e['ecosystem']}  "
             f"confidence={e['confidence']}  tokens={e['tokens']}  "
             f"signed={'yes' if e['signed'] else 'no'}  "
-            f"grade={grade}{cve_flag}"
+            f"grade={grade}{cve_flag}{integrity}"
         )
 
     lock_file.write_text("\n".join(lines) + "\n")
@@ -2223,6 +2299,97 @@ def _check_balance():
     sys.exit(1)
 
 
+def _verify_from_lock_offline(entries: list[dict], ci_mode: bool):
+    """Verify deps using integrity data embedded in cyg.lock. No API calls, no quota.
+
+    For each entry with sha256 + signature: load artifact from cache or CDN,
+    verify SHA-256 matches, verify Ed25519 signature. Entries without integrity
+    data report their lock-recorded status with a note to regenerate.
+    """
+    keys = _fetch_signing_keys()
+    public_pem = None
+    if keys and keys.get("current", {}).get("public_key_pem"):
+        public_pem = keys["current"]["public_key_pem"]
+
+    print(f"  Verifying {len(entries)} dependencies from cyg.lock (offline, no quota)...\n")
+    print(f"  {'Library':<35} {'Version':<12} {'Integrity':<22} Grade")
+    print(f"  {'─' * 82}")
+
+    verified = 0
+    failed = 0
+    no_integrity = 0
+    security_issue = False
+
+    for e in entries:
+        lib = e["library"]
+        ver = e.get("version") or "?"
+        grade = e.get("grade") or _confidence_grade(e.get("confidence", "?")).strip()
+        sha = e.get("sha256")
+        sig = e.get("signature")
+        eco = e.get("ecosystem") or "python"
+
+        if e.get("confidence") == "SECURITY_ISSUE_DETECTED":
+            security_issue = True
+
+        if not sha or not sig:
+            no_integrity += 1
+            status = "no integrity data"
+            print(f"  {lib:<35} {ver:<12} {status:<22} {grade}")
+            continue
+
+        artifact_data = _artifact_cache_get(sha)
+        if not artifact_data:
+            manifest = _api(f"/manifest/{eco}/{lib.replace('/', '__').replace(':', '__')}/{ver}", quiet=True)
+            if manifest:
+                artifact_data = _download_artifact_bytes(eco, lib, ver, manifest)
+            if artifact_data:
+                actual_sha = hashlib.sha256(artifact_data).hexdigest()
+                if actual_sha == sha:
+                    _artifact_cache_set(sha, artifact_data)
+                else:
+                    print(f"  {lib:<35} {ver:<12} {'SHA-256 MISMATCH':<22} {grade}")
+                    failed += 1
+                    continue
+            else:
+                cached_file = _artifact_cache_dir() / sha
+                if not cached_file.exists():
+                    print(f"  {lib:<35} {ver:<12} {'download failed':<22} {grade}")
+                    failed += 1
+                    continue
+
+        if artifact_data and public_pem:
+            sig_ok = _verify_ed25519_signature(artifact_data, sig, public_pem)
+            if sig_ok is True:
+                verified += 1
+                print(f"  {lib:<35} {ver:<12} {'OK (offline)':<22} {grade}")
+            elif sig_ok is False:
+                failed += 1
+                print(f"  {lib:<35} {ver:<12} {'SIGNATURE INVALID':<22} {grade}")
+            else:
+                verified += 1
+                print(f"  {lib:<35} {ver:<12} {'SHA-256 OK (no lib)':<22} {grade}")
+        elif artifact_data:
+            verified += 1
+            print(f"  {lib:<35} {ver:<12} {'SHA-256 OK':<22} {grade}")
+        else:
+            failed += 1
+            print(f"  {lib:<35} {ver:<12} {'verify failed':<22} {grade}")
+
+    print(f"\n  ── Summary ──")
+    print(f"  Integrity verified: {verified}/{len(entries)}")
+    if failed:
+        print(f"  Failed:             {failed}")
+    if no_integrity:
+        print(f"  No integrity data:  {no_integrity}  (regenerate lock: cyg lock)")
+    print(f"  Quota used:         0 (offline verification)")
+    print()
+
+    if ci_mode and security_issue:
+        sys.exit(1)
+    if ci_mode and failed > 0:
+        sys.exit(1)
+
+
 def cmd_verify(args):
     """Verify library or project deps. Single lib or auto-detect lockfile.
 
@@ -2233,8 +2400,27 @@ def cmd_verify(args):
       cyg verify --ci               # CI mode: exit 1 only on SECURITY_ISSUE
     """
     _check_tos()
-    _check_balance()
     library = getattr(args, "library", None)
+    from_lock = getattr(args, "from_lock", False)
+
+    # --from-lock with integrity data skips quota gate entirely
+    if from_lock and not library:
+        lock_entries = _parse_cygnus_lock()
+        if not lock_entries:
+            print("  No cyg.lock found. Run 'cyg lock' first.")
+            return
+        ci_mode = getattr(args, "ci", False)
+        has_integrity = any(e.get("sha256") and e.get("signature") for e in lock_entries)
+        if has_integrity:
+            _verify_from_lock_offline(lock_entries, ci_mode)
+            return
+        # No integrity data — fall back to online (quota applies)
+        _check_balance()
+        ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
+        _verify_project(ecosystem, [e["library"] for e in lock_entries], ci_mode)
+        return
+
+    _check_balance()
     # Ecosystem priority: explicit flag > config file > auto-detect > python
     ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
     ci_mode = getattr(args, "ci", False)
@@ -2247,8 +2433,6 @@ def cmd_verify(args):
     elif library and "@" in library:
         library, pin_version = library.rsplit("@", 1)
 
-    from_lock = getattr(args, "from_lock", False)
-
     check_sig = getattr(args, "check_signature", False)
 
     if library:
@@ -2258,37 +2442,29 @@ def cmd_verify(args):
         if ci_mode and result.get("confidence") == "SECURITY_ISSUE_DETECTED":
             sys.exit(1)
     else:
-        # Project-wide verify — from cyg.lock or native lockfile
-        if from_lock:
-            deps = _parse_cygnus_lock()
+        # Project-wide verify — from native lockfile
+        # Multi-ecosystem: if no explicit --ecosystem, detect all and verify each
+        if not args.ecosystem:
+            ecosystems = _detect_all_ecosystems()
+            if not ecosystems:
+                print("  No lockfile found. Specify a library: cyg verify <library>")
+                return
+            total_deps = 0
+            for eco in ecosystems:
+                deps = _parse_lockfile(eco)
+                if deps:
+                    if len(ecosystems) > 1:
+                        print(f"\n  ── {eco.upper()} ({len(deps)} libraries) ──")
+                    total_deps += len(deps)
+                    _verify_project(eco, deps, ci_mode)
+            if total_deps == 0:
+                print("  No lockfile found. Specify a library: cyg verify <library>")
+        else:
+            deps = _parse_lockfile(ecosystem)
             if not deps:
-                print("  No cyg.lock found. Run 'cyg lock' first.")
+                print("  No lockfile found. Specify a library: cyg verify <library>")
                 return
             _verify_project(ecosystem, deps, ci_mode)
-        else:
-            # Multi-ecosystem: if no explicit --ecosystem, detect all and verify each
-            if not args.ecosystem:
-                ecosystems = _detect_all_ecosystems()
-                if not ecosystems:
-                    print("  No lockfile found. Specify a library: cyg verify <library>")
-                    return
-                total_deps = 0
-                any_security_issue = False
-                for eco in ecosystems:
-                    deps = _parse_lockfile(eco)
-                    if deps:
-                        if len(ecosystems) > 1:
-                            print(f"\n  ── {eco.upper()} ({len(deps)} libraries) ──")
-                        total_deps += len(deps)
-                        _verify_project(eco, deps, ci_mode)
-                if total_deps == 0:
-                    print("  No lockfile found. Specify a library: cyg verify <library>")
-            else:
-                deps = _parse_lockfile(ecosystem)
-                if not deps:
-                    print("  No lockfile found. Specify a library: cyg verify <library>")
-                    return
-                _verify_project(ecosystem, deps, ci_mode)
 
 
 _MAVEN_CENTRAL = "https://repo1.maven.org/maven2"
@@ -4277,8 +4453,13 @@ def _first_run_onboarding():
     print()
 
 
-def _parse_cygnus_lock() -> list[str]:
-    """Parse cyg.lock to get library names. Falls back to cygnus.lock."""
+def _parse_cygnus_lock() -> list[dict]:
+    """Parse cyg.lock into structured entries. Falls back to cygnus.lock.
+
+    Returns list of dicts with keys: library, version, ecosystem, confidence,
+    tokens, signed, grade, cves, sha256, signature, key_id.
+    Missing fields default to None/0.
+    """
     lock_file = Path.cwd() / "cyg.lock"
     if not lock_file.exists():
         lock_file = Path.cwd() / "cygnus.lock"
@@ -4289,10 +4470,49 @@ def _parse_cygnus_lock() -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Format: library==version  confidence=X  tokens=N  signed=yes  grade=A
-        lib = line.split("==")[0].strip()
-        if lib:
-            deps.append(lib)
+        parts = line.split("==", 1)
+        lib = parts[0].strip()
+        if not lib:
+            continue
+        entry = {"library": lib, "version": None, "ecosystem": None,
+                 "confidence": None, "tokens": 0, "signed": False,
+                 "grade": None, "cves": 0, "sha256": None,
+                 "signature": None, "key_id": None}
+        if len(parts) > 1:
+            rest = parts[1]
+            ver_end = rest.find("  ")
+            if ver_end > 0:
+                entry["version"] = rest[:ver_end].strip()
+                fields_str = rest[ver_end:]
+            else:
+                entry["version"] = rest.strip()
+                fields_str = ""
+            for field in fields_str.split("  "):
+                field = field.strip()
+                if "=" not in field:
+                    continue
+                k, v = field.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k == "ecosystem":
+                    entry["ecosystem"] = v
+                elif k == "confidence":
+                    entry["confidence"] = v
+                elif k == "tokens":
+                    entry["tokens"] = int(v) if v.isdigit() else 0
+                elif k == "signed":
+                    entry["signed"] = v == "yes"
+                elif k == "grade":
+                    entry["grade"] = v
+                elif k == "cves":
+                    entry["cves"] = int(v) if v.isdigit() else 0
+                elif k == "sha256":
+                    entry["sha256"] = v
+                elif k == "signature":
+                    entry["signature"] = v
+                elif k == "key_id":
+                    entry["key_id"] = v
+        deps.append(entry)
     return deps
 
 
