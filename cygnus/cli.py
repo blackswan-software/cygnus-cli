@@ -1103,8 +1103,20 @@ def cmd_request(args):
     _check_tos()
     _check_balance()
     library = args.library
-    version = getattr(args, "version", None) or "latest"
+    version = getattr(args, "version", None) or ""
     ecosystem = args.ecosystem or _load_config().get("ecosystem") or _detect_ecosystem() or "python"
+
+    pin_version = ""
+    if "==" in library:
+        library, pin_version = library.split("==", 1)
+    elif "@" in library and not library.startswith("@"):
+        library, pin_version = library.rsplit("@", 1)
+    if pin_version:
+        version = pin_version
+
+    if not version:
+        _parse_lockfile(ecosystem)
+        version = _LOCKFILE_VERSIONS.get(library, "latest")
 
     if not _upstream_package_exists(ecosystem, library):
         print(f"\n  Package '{library}' not found in the {ecosystem} registry.", file=sys.stderr)
@@ -1147,8 +1159,23 @@ def cmd_request(args):
         sys.exit(1)
 
     status = data.get("status", "queued")
-    print(f"  ✓ Queued for priority verification.")
-    print(f"  You'll receive an email when ready.")
+    if status == "already_queued":
+        pending_since = data.get("pending_since", "")
+        since_msg = f" (pending since {pending_since})" if pending_since else ""
+        print(f"  Already queued for {ecosystem}/{library}@{version}{since_msg}.")
+        print(f"  You will be notified when ready.")
+    elif status == "already_compiled":
+        grade = data.get("grade", "?")
+        confidence = data.get("confidence", "?")
+        if confidence in ("FULLY_VERIFIED", "VERIFIED_PARTIAL"):
+            print(f"  Already verified: {library} → {confidence} ({grade})")
+            print(f"  Run `cyg verify {library}` to see details.")
+        else:
+            print(f"  ✓ Re-queued for full verification (currently {confidence}/{grade}).")
+            print(f"  You'll receive an email when ready.")
+    else:
+        print(f"  ✓ Queued for priority verification.")
+        print(f"  You'll receive an email when ready.")
     print()
     print(f"  Run `cyg verify {library}` anytime to check status.")
 
@@ -3421,9 +3448,12 @@ def _print_verify_summary(results: dict, ci_mode: bool):
         print(f"  Badge: {badge_url}")
         print(f"  Markdown: [![cygnus-verified]({badge_url})]({REGISTRY_URL})")
     else:
-        print(f"\n  No fully verified libraries yet — verification in progress")
+        if nc > 0:
+            print(f"\n  No fully verified libraries yet — {nc} queued for compilation")
+        else:
+            print(f"\n  No fully verified libraries yet")
 
-    if nc > 0:
+    if nc > 0 and fv > 0:
         print(f"  {nc} deps not in corpus — queued for compilation")
 
     if ci_mode:
@@ -3950,8 +3980,11 @@ def cmd_auth_status(args):
         print(f"  Billing: {'live' if billing_active else 'Free'}")
         print(f"  Rate limits: {'enforced' if limits_enforced else 'disabled (operator override)'}")
     else:
-        print(f"  Tier: unknown (server unreachable)")
-        print(f"  (server unreachable — usage stats unavailable)")
+        if _last_api_error == 401:
+            print(f"  Your key was reset or is invalid — run `cyg login` to re-authenticate.")
+        else:
+            print(f"  Tier: unknown (server unreachable)")
+            print(f"  (server unreachable — usage stats unavailable)")
 
 
 def cmd_auth_logout(args):
@@ -4389,8 +4422,6 @@ def cmd_cache(args):
     else:
         print("  Usage: cyg cache [clear|status]")
 
-
-# ── Admin Commands (owner-only, hidden) ─────────────────────────────
 
 
 
