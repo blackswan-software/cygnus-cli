@@ -2,7 +2,7 @@
 """Cygnus CLI — pre-compiled, verified artifacts alongside your package manager.
 
 Usage:
-  cyg verify <lib>         Verify a library (grade, sigs, CVEs, SBOM, badge)
+  cyg verify <lib>         Verify + download pre-compiled deps (one-step)
   cyg check <lib>          CVE scan (free, no account needed)
   cyg add <lib> [ver]      Download pre-compiled, verified artifact
   cyg request <lib>        Request verification for a library
@@ -671,6 +671,62 @@ def _download(url: str, dest: Path) -> bool:
     except Exception as e:
         print(f"  Download failed: {e}", file=sys.stderr)
         return False
+
+
+def _auto_install_artifact(ecosystem: str, library: str, version: str,
+                           confidence: str):
+    """Download and cache artifact during verify — one-step workflow.
+
+    After verify reports a grade, auto-download the pre-compiled artifact
+    to ~/.cyg/ so the user doesn't need a separate `cyg add` step.
+    Skips download if already cached.
+    """
+    lib_encoded = library.replace("/", "__").replace(":", "__")
+    dest_dir = CYGNUS_HOME / ecosystem / library / version
+
+    # Skip if already cached
+    manifest_path = dest_dir / "manifest.json"
+    if manifest_path.exists():
+        return
+
+    manifest = _api(f"/manifest/{ecosystem}/{lib_encoded}/{version}")
+    if not manifest:
+        return
+
+    artifacts = manifest.get("artifacts", {})
+    target_info = artifacts.get(_PLATFORM) or artifacts.get("universal")
+    target_key = _PLATFORM if _PLATFORM in artifacts else "universal"
+    if not target_info:
+        return
+
+    filename = target_info.get("filename", "")
+    if not filename or filename == "manifest.json":
+        return
+
+    expected_sha = target_info.get("sha256", "")
+    cdn_url = f"https://cdn.blackswan-software.ai/artifacts/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}"
+    proxy_url = f"{REGISTRY_URL}/artifact/{ecosystem}/{lib_encoded}/{version}/{target_key}/{filename}?proxy=true"
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / filename
+
+    downloaded = _download(cdn_url, dest_file)
+    if not downloaded:
+        downloaded = _download(proxy_url, dest_file)
+
+    if downloaded:
+        if expected_sha:
+            actual = hashlib.sha256(dest_file.read_bytes()).hexdigest()
+            if actual != expected_sha:
+                print(f"  ⚠ SHA256 mismatch — removing corrupted artifact")
+                dest_file.unlink()
+                return
+
+        manifest["confidence"] = confidence
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+        size_kb = dest_file.stat().st_size / 1024
+        print(f"  Artifact:    cached ({size_kb:.0f}KB) → {dest_dir}")
 
 
 def _detect_ecosystem() -> str | None:
@@ -1444,7 +1500,7 @@ def cmd_help(args):
     print("Cygnus — pre-compiled, verified artifacts alongside your package manager.\n")
     sections = [
         ("Commands", [
-            ("verify",     "Verify a library or all project deps (grade, sigs, CVEs, SBOM, badge)"),
+            ("verify",     "Verify + download pre-compiled deps (grade, sigs, CVEs, artifacts)"),
             ("check",      "CVE scan (free, no account needed)"),
             ("add",        "Download pre-compiled, verified artifact"),
             ("request",    "Request verification for a library"),
@@ -2320,9 +2376,13 @@ def _check_balance():
     if isinstance(balance, (int, float)) and balance > 0:
         return True
 
-    print("  Daily free quota exhausted and no balance on account.")
-    print("  Add funds:    https://blackswan-software.ai/account")
-    print("  Need help?    support@blackswan-software.ai")
+    resets_at = usage.get("resets_at", "midnight UTC")
+    tier = usage.get("tier", "free")
+    print(f"  Daily {tier}-tier quota exhausted ({remaining} requests remaining).")
+    print(f"  Resets at:    {resets_at}")
+    if tier == "free":
+        print(f"  Upgrade:      cyg deposit <USD> (unlocks higher limits)")
+    print(f"  Need help?    support@blackswan-software.ai")
     sys.exit(1)
 
 
@@ -2418,13 +2478,18 @@ def _verify_from_lock_offline(entries: list[dict], ci_mode: bool):
 
 
 def cmd_verify(args):
-    """Verify library or project deps. Single lib or auto-detect lockfile.
+    """Verify + download pre-compiled artifacts — one command, ready to build.
+
+    Scans project deps, checks verification status, downloads pre-compiled
+    artifacts to ~/.cyg/, and caches them for offline/CI use. Like npm install
+    but with verification grades, signatures, and CVE checks included.
 
     Usage:
-      cyg verify requests           # single library
+      cyg verify requests           # verify + download single library
       cyg verify requests==2.31.0   # specific version
-      cyg verify                    # auto-detect lockfile, verify all deps
+      cyg verify                    # auto-detect lockfile, verify + download all deps
       cyg verify --ci               # CI mode: exit 1 only on SECURITY_ISSUE
+      cyg verify --from-lock        # restore from cyg.lock (offline if integrity data present)
     """
     _check_tos()
     library = getattr(args, "library", None)
@@ -2882,6 +2947,11 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     if badge_url:
         print(f"  Badge:       {REGISTRY_URL}{badge_url}")
     print(f"  SBOM:        {REGISTRY_URL}{data.get('sbom_url', '')}")
+
+    # Auto-download artifact for verified libraries — one-step workflow
+    if confidence in ("FULLY_VERIFIED", "VERIFIED_PARTIAL", "TESTS_PASS"):
+        _auto_install_artifact(ecosystem, library, version, confidence)
+
     print()
 
     return {
@@ -3323,7 +3393,7 @@ def _verify_project(ecosystem: str, deps: list[str], ci_mode: bool):
         if not changed_deps:
             hours_ago = cache_age / 3600
             print(f"  All {len(deps)} dependencies cached ({hours_ago:.0f}h ago, refreshes at 24h).")
-            _print_verify_summary(prev_results, ci_mode)
+            _print_verify_summary(prev_results, ci_mode, ecosystem)
             return
         print(f"  {len(changed_deps)} new deps (of {len(deps)} total). {len(prev_results)} cached. Verifying...")
     elif cache_expired and prev_results:
@@ -3390,6 +3460,15 @@ def _verify_project(ecosystem: str, deps: list[str], ci_mode: bool):
         if (i + 1) % 20 == 0:
             print(f"    ... {i + 1}/{len(individual_deps)}")
 
+    # Auto-download artifacts for verified deps — one-step workflow
+    installed = 0
+    for lib, r in results.items():
+        conf = r.get("confidence", "")
+        ver = r.get("version")
+        if ver and conf in ("FULLY_VERIFIED", "VERIFIED_PARTIAL", "TESTS_PASS", "VERIFIED"):
+            _auto_install_artifact(ecosystem, lib, ver, conf)
+            installed += 1
+
     # Save state for incremental
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(json.dumps({
@@ -3399,10 +3478,10 @@ def _verify_project(ecosystem: str, deps: list[str], ci_mode: bool):
         "ecosystem": ecosystem,
     }, indent=2) + "\n")
 
-    _print_verify_summary(results, ci_mode)
+    _print_verify_summary(results, ci_mode, ecosystem)
 
 
-def _print_verify_summary(results: dict, ci_mode: bool):
+def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
     """Print verify summary table and exit with appropriate code for CI."""
     fv = tp = ao = nc = 0
     print(f"\n  {'Library':<35} {'Version':<12} {'Confidence':<20} Grade")
@@ -3455,6 +3534,19 @@ def _print_verify_summary(results: dict, ci_mode: bool):
 
     if nc > 0 and fv > 0:
         print(f"  {nc} deps not in corpus — queued for compilation")
+
+    # Audit deliverables per lib — SBOM and verify URLs
+    verified_libs = [(lib, r) for lib, r in sorted(results.items())
+                     if r.get("version") and r.get("confidence") not in
+                     ("NOT_COMPILED", None)]
+    if verified_libs and ecosystem:
+        print(f"\n  Deliverables:")
+        for lib, r in verified_libs:
+            lib_enc = lib.replace("/", "__").replace(":", "__")
+            ver = r.get("version", "")
+            print(f"    {lib}@{ver}")
+            print(f"      SBOM:  {REGISTRY_URL}/sbom/{ecosystem}/{lib_enc}/{ver}")
+            print(f"      Audit: {REGISTRY_URL}/verify/{ecosystem}/{lib_enc}/{ver}")
 
     if ci_mode:
         # CI mode: output JSON summary for dashboards. Never fail on coverage gaps.
@@ -4423,9 +4515,7 @@ def cmd_cache(args):
         print("  Usage: cyg cache [clear|status]")
 
 
-
-
-
+# ── Admin Commands (owner-only, hidden) ─────────────────────────────
 
 
 def _first_run_onboarding():
@@ -4472,14 +4562,14 @@ def _first_run_onboarding():
         if lockfile_deps:
             print(f"  {len(lockfile_deps)} {ecosystem} dependencies detected.")
             print()
-            print("    cyg verify               Verify all deps (incremental, cached 24h)")
+            print("    cyg verify               Verify + download all deps (one-step)")
             print("    cyg check                Scan for known CVEs")
             print("    cyg verify --ci          CI mode (JSON output, exit 1 on security issues)")
         else:
             print("  Commands:")
-            print("    cyg verify <library>      Check a specific library")
+            print("    cyg verify <library>      Verify + download a specific library")
             print("    cyg check                 Scan for known CVEs")
-            print("    cyg add <library>     Download signed artifact")
+            print("    cyg add <library>         Download signed artifact (explicit)")
             print("    cyg status           Account + usage stats")
     print()
 
@@ -4765,7 +4855,7 @@ def _main_inner():
     p_sbom.add_argument("--ecosystem", "-e", default=None, help="Ecosystem (default: auto-detect)")
     p_sbom.add_argument("-o", "--output", default=None, help="Output file (default: stdout)")
 
-    p_verify = sub.add_parser("verify", help="Verify a library or all project deps")
+    p_verify = sub.add_parser("verify", help="Verify + download pre-compiled deps (one-step)")
     p_verify.add_argument("library", nargs="?", default=None, help="Library name or lib==version for pinning")
     p_verify.add_argument("--ecosystem", "-e", default=None, help="Ecosystem (default: auto-detect)")
     p_verify.add_argument("--ci", action="store_true", help="CI mode: JSON output, exit 1 only on security issues")
@@ -4872,7 +4962,6 @@ def _main_inner():
                          help="One-line title (prompts if missing)")
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
-
 
     # Intercept legacy flags before argparse — redirect to subcommands
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
