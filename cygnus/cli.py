@@ -1971,6 +1971,8 @@ def cmd_check(args):
         deps = [library]
         if pin_version:
             _LOCKFILE_VERSIONS[library] = pin_version
+        else:
+            _parse_lockfile(ecosystem)
     else:
         # Gather deps from lockfile OR installed artifacts
         deps = _parse_lockfile(ecosystem)
@@ -2003,6 +2005,9 @@ def cmd_check(args):
         else:
             ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
             version = ver_data.get("version", "") if ver_data else ""
+            if library and version:
+                print(f"  ⚠ No pinned version found in lockfile — checking latest ({version})")
+                print(f"    To scan your actual dependency: cyg check {lib}=={version}\n")
         if not version:
             continue
 
