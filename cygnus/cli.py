@@ -4104,36 +4104,15 @@ def cmd_auth_logout(args):
 
 
 def cmd_uninstall(args):
-    """Uninstall Cygnus CLI — cancel subscription, remove all local data."""
+    """Uninstall Cygnus CLI — remove all local data and binaries."""
     print("  This will:")
-    print(f"    1. Cancel any active subscription")
-    print(f"    2. Remove {CYGNUS_HOME}")
-    print(f"    3. Remove the cygnus binary")
+    print(f"    1. Remove {CYGNUS_HOME}")
+    print(f"    2. Remove cygnus and cyg binaries")
+    print(f"  Your server-side account is NOT deleted (use `cyg delete-account` for that).")
     confirm = input("  Continue? [y/N]: ").strip().lower()
     if confirm != "y":
         print("  Aborted.")
         return
-
-    # Cancel subscription — must succeed before wiping local auth
-    cfg = _load_config()
-    key = API_KEY or cfg.get("api_key", "")
-    cancel_ok = False
-    if key:
-        try:
-            url = f"{REGISTRY_URL}/auth/billing/cancel"
-            req = urllib.request.Request(url, method="POST")
-            req.add_header("User-Agent", "cygnus-cli/1.0")
-            req.add_header("X-API-Key", key)
-            urllib.request.urlopen(req, timeout=15)
-            print("  ✓ Subscription cancelled")
-            cancel_ok = True
-        except Exception:
-            print("  ⚠ Could not reach server to cancel subscription.")
-            print("    Your API key is preserved so you can retry.")
-            print("    Cancel manually at auth.blackswan-software.ai, then re-run uninstall.")
-            return
-    else:
-        cancel_ok = True
 
     # Remove ~/.cyg/ (and legacy ~/.cygnus/ if it still exists)
     import shutil
@@ -4513,9 +4492,6 @@ def cmd_cache(args):
         print(f"  TTL:        {CACHE_TTL}s ({CACHE_TTL // 3600}h)")
     else:
         print("  Usage: cyg cache [clear|status]")
-
-
-# ── Admin Commands (owner-only, hidden) ─────────────────────────────
 
 
 def _first_run_onboarding():
