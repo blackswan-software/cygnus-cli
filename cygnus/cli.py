@@ -2367,7 +2367,7 @@ def _check_balance():
     """Gate paid commands on quota/balance. Calls _ensure_auth first."""
     _ensure_auth()
 
-    usage = _api("/auth/usage", use_cache=True, quiet=True)
+    usage = _api("/auth/usage", use_cache=False, quiet=True)
     if not isinstance(usage, dict):
         return True
 
