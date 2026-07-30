@@ -725,6 +725,8 @@ def _auto_install_artifact(ecosystem: str, library: str, version: str,
         manifest["confidence"] = confidence
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
+        _populate_wheels_dir(ecosystem, dest_file)
+
         size_kb = dest_file.stat().st_size / 1024
         print(f"  Artifact:    cached ({size_kb:.0f}KB) → {dest_dir}")
 
@@ -805,6 +807,268 @@ if os.path.isdir(_cygnus) and _cygnus not in sys.path:
     sys.path.insert(0, _cygnus)
 """
 
+PIP_CONF_FIND_LINKS = """\
+
+# Cygnus: use locally cached wheels before downloading from PyPI.
+# pip checks ~/.cyg/python/wheels/ first — if the wheel is there, no network.
+# Remove these lines or delete ~/.cyg/ to revert to PyPI-only.
+[global]
+find-links = {wheels_dir}
+"""
+
+
+def _pip_conf_path(venv: Path = None) -> Path:
+    """Return the pip.conf path to write the find-links directive.
+
+    Prefers venv-scoped pip.conf. Falls back to user-level.
+    """
+    if venv:
+        return venv / "pip.conf"
+    return Path.home() / ".config" / "pip" / "pip.conf"
+
+
+def _install_pip_find_links(venv: Path = None) -> bool:
+    """Install pip find-links pointing to ~/.cyg/python/wheels/.
+
+    pip's --find-links is additive: if the wheel isn't in the local dir,
+    pip falls back to PyPI. Removing the config entry restores native behavior.
+    """
+    wheels_dir = CYGNUS_HOME / "python" / "wheels"
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+
+    conf = _pip_conf_path(venv)
+    existing = conf.read_text() if conf.exists() else ""
+
+    if "cygnus" in existing.lower() and str(wheels_dir) in existing:
+        return True
+
+    conf.parent.mkdir(parents=True, exist_ok=True)
+
+    if "[global]" in existing and "find-links" in existing:
+        # Append our wheels dir to existing find-links
+        lines = existing.splitlines()
+        new_lines = []
+        for line in lines:
+            new_lines.append(line)
+            if line.strip().startswith("find-links"):
+                new_lines.append(f"find-links = {wheels_dir}")
+        conf.write_text("\n".join(new_lines) + "\n")
+    else:
+        snippet = PIP_CONF_FIND_LINKS.format(wheels_dir=wheels_dir)
+        with open(conf, "a") as f:
+            f.write(snippet)
+
+    return True
+
+
+def _remove_pip_find_links(venv: Path = None):
+    """Remove cygnus find-links from pip.conf during uninstall."""
+    conf = _pip_conf_path(venv)
+    if not conf.exists():
+        return
+    text = conf.read_text()
+    if "cygnus" not in text.lower():
+        return
+
+    # Remove the cygnus block (comment + [global] + find-links)
+    lines = text.splitlines()
+    cleaned = []
+    skip = False
+    for line in lines:
+        if "cygnus" in line.lower() and ("find-links" in line.lower() or "#" in line):
+            skip = True
+            continue
+        if skip and line.strip().startswith("find-links") and str(CYGNUS_HOME) in line:
+            continue
+        if skip and (not line.strip() or line.strip().startswith("[")):
+            skip = False
+        if not skip:
+            cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    if result:
+        conf.write_text(result + "\n")
+    else:
+        conf.unlink()
+
+
+def _populate_wheels_dir(ecosystem: str, artifact_path: Path):
+    """Register a downloaded artifact with the native package manager's cache.
+
+    Python: symlink .whl into ~/.cyg/python/wheels/ for pip find-links.
+    Node:   `npm cache add <tarball>` so npm finds it offline.
+    Ruby:   `gem install --local <gem>` into user gems.
+    Dart:   copy into pub system cache so `dart pub get` finds it.
+    Go:     extract into GOPROXY file:// directory layout.
+    Java/Kotlin: extract into Maven local repo layout.
+    Elixir: extract into ~/.cyg/elixir/<lib>/ for mix path deps.
+    Swift:  extract into ~/.cyg/swift/<lib>/ for SPM path deps.
+    """
+    import subprocess
+
+    if ecosystem == "python" and artifact_path.suffix == ".whl":
+        wheels_dir = CYGNUS_HOME / "python" / "wheels"
+        wheels_dir.mkdir(parents=True, exist_ok=True)
+
+        link = wheels_dir / artifact_path.name
+        if link.exists() or link.is_symlink():
+            if link.is_symlink() and link.resolve() == artifact_path.resolve():
+                return
+            link.unlink()
+
+        try:
+            link.symlink_to(artifact_path.resolve())
+        except OSError:
+            import shutil
+            shutil.copy2(artifact_path, link)
+
+    elif ecosystem == "node" and artifact_path.suffix in (".tgz", ".gz"):
+        try:
+            subprocess.run(
+                ["npm", "cache", "add", str(artifact_path)],
+                capture_output=True, timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    elif ecosystem == "ruby" and artifact_path.suffix == ".gem":
+        try:
+            subprocess.run(
+                ["gem", "install", "--local", str(artifact_path),
+                 "--no-document", "--user-install"],
+                capture_output=True, timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    elif ecosystem == "dart":
+        _populate_dart_cache(artifact_path)
+
+    elif ecosystem == "go":
+        _populate_go_proxy(artifact_path)
+
+    elif ecosystem in ("java", "kotlin"):
+        _populate_maven_repo(ecosystem, artifact_path)
+
+    elif ecosystem in ("elixir", "swift"):
+        _extract_to_cache(ecosystem, artifact_path)
+
+
+def _populate_dart_cache(artifact_path: Path):
+    """Copy package into Dart's pub system cache.
+
+    Pub cache layout: ~/.pub-cache/hosted/pub.dev/<name>-<ver>/
+    Extracting the tarball there makes `dart pub get --offline` find it.
+    """
+    import tarfile
+
+    if not artifact_path.suffix in (".gz", ".tar"):
+        return
+
+    stem = artifact_path.stem
+    if stem.endswith(".tar"):
+        stem = stem[:-4]
+
+    pub_cache = Path.home() / ".pub-cache" / "hosted" / "pub.dev" / stem
+    if pub_cache.exists():
+        return
+
+    try:
+        with tarfile.open(artifact_path, "r:gz") as tf:
+            tf.extractall(pub_cache, filter="data")
+    except (tarfile.TarError, OSError):
+        pass
+
+
+def _populate_go_proxy(artifact_path: Path):
+    """Extract Go module source into GOPROXY file:// directory layout.
+
+    Go module proxy layout:
+      ~/.cyg/go/proxy/<module>/@v/list        (version list)
+      ~/.cyg/go/proxy/<module>/@v/<ver>.info   (version metadata)
+      ~/.cyg/go/proxy/<module>/@v/<ver>.zip    (source)
+      ~/.cyg/go/proxy/<module>/@v/<ver>.mod    (go.mod)
+    """
+    parent = artifact_path.parent
+    lib = parent.parent.name
+    version = parent.name
+
+    mod_path = lib.replace("__", "/")
+
+    proxy_dir = CYGNUS_HOME / "go" / "proxy" / mod_path / "@v"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+
+    list_file = proxy_dir / "list"
+    existing = list_file.read_text().splitlines() if list_file.exists() else []
+    if version not in existing:
+        with open(list_file, "a") as f:
+            f.write(version + "\n")
+
+    import shutil
+    zip_dest = proxy_dir / f"{version}.zip"
+    if not zip_dest.exists():
+        shutil.copy2(artifact_path, zip_dest)
+
+    info_file = proxy_dir / f"{version}.info"
+    if not info_file.exists():
+        info_file.write_text(f'{{"Version":"{version}"}}\n')
+
+
+def _populate_maven_repo(ecosystem: str, artifact_path: Path):
+    """Extract JARs into Maven local repo layout.
+
+    Maven layout: ~/.cyg/{eco}/repo/<groupId-dirs>/<artifactId>/<version>/<artifactId>-<version>.jar
+    """
+    import tarfile
+
+    parent = artifact_path.parent
+    lib = parent.parent.name
+    version = parent.name
+
+    if "__" in lib:
+        parts = lib.split("__")
+        group_id = parts[0]
+        artifact_id = parts[1] if len(parts) > 1 else parts[0]
+    else:
+        group_id = lib
+        artifact_id = lib
+
+    group_dirs = group_id.replace(".", "/")
+    repo_dir = CYGNUS_HOME / ecosystem / "repo" / group_dirs / artifact_id / version
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    if artifact_path.suffix in (".gz", ".tar"):
+        try:
+            with tarfile.open(artifact_path, "r:gz") as tf:
+                tf.extractall(repo_dir, filter="data")
+        except (tarfile.TarError, OSError):
+            pass
+
+
+def _extract_to_cache(ecosystem: str, artifact_path: Path):
+    """Extract tarball to ~/.cyg/{eco}/<lib>/<ver>/ for path-based deps.
+
+    Used by Elixir (mix path deps) and Swift (SPM local packages).
+    After extraction, the user references the path in mix.exs / Package.swift.
+    """
+    import tarfile
+
+    parent = artifact_path.parent
+    lib = parent.parent.name
+    version = parent.name
+
+    dest = CYGNUS_HOME / ecosystem / lib / version / "src"
+    if dest.exists():
+        return
+
+    if artifact_path.suffix in (".gz", ".tar"):
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(artifact_path, "r:gz") as tf:
+                tf.extractall(dest, filter="data")
+        except (tarfile.TarError, OSError):
+            pass
+
 # Per-ecosystem resolution hook templates
 # Each hook tells the native package manager to check ~/.cyg/{eco}/ first.
 HOOK_TEMPLATES = {
@@ -813,64 +1077,77 @@ HOOK_TEMPLATES = {
         "global_file": "~/.npmrc",
         "marker": "cygnus",
         "content": """\
-# Cygnus: native addon override directory
-# Native npm packages remain untouched — Cygnus compiled addons load first.
-cygnus_addon_path={cygnus_home}/node
+# Cygnus: prefer locally cached packages before downloading from registry.
+# npm checks its cache first with prefer-offline; cyg add pre-populates it.
+# Remove this line or delete ~/.cyg/ to revert to registry-only.
+prefer-offline=true
 """,
-        "description": "Node.js: project .npmrc",
-        "global_description": "Node.js: user-level ~/.npmrc",
+        "description": "Node.js: project .npmrc (prefer-offline)",
+        "global_description": "Node.js: user-level ~/.npmrc (prefer-offline)",
     },
     "rust": {
         "file": ".cargo/config.toml",
         "global_file": "~/.cargo/config.toml",
         "marker": "cygnus",
         "content": """\
-# Cygnus: pre-compiled crate registry
-# Native crates.io remains the fallback. Cygnus versions resolve first.
-[source.cygnus]
-directory = "{cygnus_home}/rust"
+# Cygnus: local vendored crate source
+# crates.io remains available as fallback — Cygnus-cached crates resolve first.
+# Remove this block or delete ~/.cyg/ to revert to crates.io-only.
+[source.cygnus-local]
+local-registry = "{cygnus_home}/rust/registry"
 
 [source.crates-io]
-replace-with = "cygnus"
+replace-with = "cygnus-local"
 """,
-        "description": "Rust: project .cargo/config.toml",
+        "description": "Rust: .cargo/config.toml (local registry)",
         "global_description": "Rust: user-level ~/.cargo/config.toml",
     },
     "go": {
-        "file": None,  # env vars, not a file
-        "marker": None,
+        "file": None,
+        "marker": "cygnus",
         "env": {
-            "GOPROXY": "file://{cygnus_home}/go,https://proxy.golang.org,direct",
-            "GOMODCACHE": "{cygnus_home}/go/cache",
+            "GOFLAGS": "-modcacherw",
         },
-        "description": "Go: GOPROXY + GOMODCACHE env vars",
+        "go_env": {
+            "GOPROXY": "file://{cygnus_home}/go/proxy,https://proxy.golang.org,direct",
+        },
+        "description": "Go: GOPROXY with local module cache (file:// before proxy.golang.org)",
     },
     "java": {
         "file": ".mvn/settings.xml",
         "global_file": "~/.m2/settings.xml",
         "marker": "cygnus",
         "content": """\
-<!-- Cygnus: pre-compiled Maven artifacts -->
-<!-- Native Maven Central remains the fallback. -->
+<!-- Cygnus: local Maven repo checked BEFORE Central. -->
+<!-- Remove this file or delete ~/.cyg/ to revert to Central-only. -->
 <settings>
-  <mirrors>
-    <mirror>
+  <profiles>
+    <profile>
       <id>cygnus</id>
-      <mirrorOf>central</mirrorOf>
-      <url>file://{cygnus_home}/java</url>
-    </mirror>
-  </mirrors>
+      <repositories>
+        <repository>
+          <id>cygnus-local</id>
+          <url>file://{cygnus_home}/java/repo</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>cygnus</activeProfile>
+  </activeProfiles>
 </settings>
 """,
-        "description": "Java (Maven): project .mvn/settings.xml",
+        "description": "Java (Maven): local repo in .mvn/settings.xml",
         "global_description": "Java (Maven): user-level ~/.m2/settings.xml",
         "alt_file": "settings.gradle",
         "alt_content": """\
-// Cygnus: pre-compiled Gradle artifacts
-// Native repositories remain the fallback.
+// Cygnus: local Maven repo checked before mavenCentral.
+// Remove this file or delete ~/.cyg/ to revert.
 pluginManagement {{
     repositories {{
-        maven {{ url = uri("file://{cygnus_home}/java") }}
+        maven {{ url = uri("file://{cygnus_home}/java/repo") }}
         gradlePluginPortal()
         mavenCentral()
     }}
@@ -883,7 +1160,7 @@ pluginManagement {{
         "marker": "cygnus",
         "content": """\
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Cygnus: pre-compiled NuGet packages -->
+<!-- Cygnus: local NuGet source. Remove this file or delete ~/.cyg/ to revert. -->
 <configuration>
   <packageSources>
     <add key="cygnus" value="{cygnus_home}/csharp" />
@@ -895,48 +1172,50 @@ pluginManagement {{
         "global_description": "C#: user-level NuGet.Config (~/.nuget/NuGet/)",
     },
     "ruby": {
-        "file": None,  # Gemfile modification
+        "file": None,
         "marker": "cygnus",
-        "description": "Ruby: Gemfile source (manual — add `source 'file://~/.cyg/ruby'` to Gemfile)",
+        "description": "Ruby: gem install --local (auto on cyg add, installed to user gems)",
     },
     "dart": {
-        "file": "pubspec.yaml",
-        "global_file": None,
+        "file": None,
         "marker": "cygnus",
-        "content": """\
-# Cygnus: pre-compiled Dart packages
-# Native pub.dev remains the fallback.
-dependency_overrides:
-  # Cygnus compiled packages resolve from local cache
-  # cygnus_path: {cygnus_home}/dart
-""",
-        "description": "Dart: pubspec.yaml dependency override",
+        "description": "Dart: extracted to ~/.pub-cache/hosted/pub.dev/ (auto on cyg add, dart pub get --offline finds it)",
     },
     "kotlin": {
         "file": ".mvn/settings.xml",
         "global_file": "~/.m2/settings.xml",
         "marker": "cygnus",
         "content": """\
-<!-- Cygnus: pre-compiled Kotlin artifacts -->
-<!-- Native Maven Central remains the fallback. -->
+<!-- Cygnus: local Maven repo checked BEFORE Central. -->
+<!-- Remove this file or delete ~/.cyg/ to revert to Central-only. -->
 <settings>
-  <mirrors>
-    <mirror>
+  <profiles>
+    <profile>
       <id>cygnus</id>
-      <mirrorOf>central</mirrorOf>
-      <url>file://{cygnus_home}/kotlin</url>
-    </mirror>
-  </mirrors>
+      <repositories>
+        <repository>
+          <id>cygnus-local</id>
+          <url>file://{cygnus_home}/kotlin/repo</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>cygnus</activeProfile>
+  </activeProfiles>
 </settings>
 """,
-        "description": "Kotlin: project .mvn/settings.xml",
+        "description": "Kotlin: local repo in .mvn/settings.xml",
         "global_description": "Kotlin: user-level ~/.m2/settings.xml",
         "alt_file": "settings.gradle.kts",
         "alt_content": """\
-// Cygnus: pre-compiled Kotlin artifacts
+// Cygnus: local Maven repo checked before mavenCentral.
+// Remove this file or delete ~/.cyg/ to revert.
 pluginManagement {{
     repositories {{
-        maven {{ url = uri("file://{cygnus_home}/kotlin") }}
+        maven {{ url = uri("file://{cygnus_home}/kotlin/repo") }}
         gradlePluginPortal()
         mavenCentral()
     }}
@@ -948,8 +1227,7 @@ pluginManagement {{
         "global_file": "~/.sbt/1.0/cygnus.sbt",
         "marker": "cygnus",
         "content": """\
-// Cygnus: pre-compiled Scala artifacts
-// Native resolvers remain the fallback.
+// Cygnus: local Scala artifact cache. Remove this file or delete ~/.cyg/ to revert.
 resolvers += "cygnus" at "file://{cygnus_home}/scala"
 """,
         "description": "Scala: project/cygnus.sbt resolver",
@@ -958,15 +1236,12 @@ resolvers += "cygnus" at "file://{cygnus_home}/scala"
     "elixir": {
         "file": None,
         "marker": "cygnus",
-        "description": "Elixir: add `{:dep, path: \"~/.cyg/elixir/dep\"}` overrides in mix.exs deps",
+        "description": "Elixir: extracted to ~/.cyg/elixir/<lib>/<ver>/src/ (add {:dep, path: \"...\"} in mix.exs)",
     },
     "swift": {
         "file": None,
-        "marker": None,
-        "env": {
-            "SWIFT_PACKAGE_REGISTRY_URL": "file://{cygnus_home}/swift",
-        },
-        "description": "Swift: SWIFT_PACKAGE_REGISTRY_URL env var",
+        "marker": "cygnus",
+        "description": "Swift: extracted to ~/.cyg/swift/<lib>/<ver>/src/ (add .package(path: \"...\") in Package.swift)",
     },
     "php": {
         "file": "composer.json",
@@ -974,6 +1249,7 @@ resolvers += "cygnus" at "file://{cygnus_home}/scala"
         "marker": "cygnus",
         "content": """\
 {{
+  "_comment": "Cygnus: local path repo. Remove this block or delete ~/.cyg/ to revert.",
   "repositories": [
     {{
       "type": "path",
@@ -986,16 +1262,15 @@ resolvers += "cygnus" at "file://{cygnus_home}/scala"
         "global_description": "PHP: user-level ~/.composer/config.json",
     },
     "cpp": {
-        "file": "conanfile.txt",
-        "global_file": "~/.conan2/remotes.json",
+        "file": "CMakeLists.txt",
+        "global_file": None,
         "marker": "cygnus",
         "content": """\
-# Cygnus: pre-compiled C/C++ packages
-# Add to [requires] section:
-# cygnus_local_path = {cygnus_home}/cpp
+# Cygnus: check local cache before fetching from network.
+# Remove this line or delete ~/.cyg/ to revert.
+list(PREPEND CMAKE_PREFIX_PATH "{cygnus_home}/cpp")
 """,
-        "description": "C/C++: Conan local cache (manual — set CONAN_USER_HOME or add remote)",
-        "global_description": "C/C++: user-level Conan remotes",
+        "description": "C/C++: CMAKE_PREFIX_PATH in CMakeLists.txt",
     },
 }
 
@@ -1012,11 +1287,25 @@ def _install_hook(eco: str, use_global: bool = False) -> bool:
     description = hook.get(desc_key, hook["description"])
 
     # Env-var-based hooks (Go) — always global
-    if hook.get("env"):
+    if hook.get("env") or hook.get("go_env"):
         print(f"  {description}")
-        print(f"  Add to your shell profile:")
-        for var, val in hook["env"].items():
-            print(f"    export {var}=\"{val.format(cygnus_home=cygnus_home)}\"")
+        if hook.get("go_env"):
+            import subprocess
+            for var, val in hook["go_env"].items():
+                resolved = val.format(cygnus_home=cygnus_home)
+                try:
+                    subprocess.run(
+                        ["go", "env", "-w", f"{var}={resolved}"],
+                        capture_output=True, timeout=10,
+                    )
+                    print(f"  Set: {var}={resolved}")
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    print(f"  Add to your shell profile:")
+                    print(f"    export {var}=\"{resolved}\"")
+        if hook.get("env"):
+            print(f"  Add to your shell profile:")
+            for var, val in hook["env"].items():
+                print(f"    export {var}=\"{val.format(cygnus_home=cygnus_home)}\"")
         return True
 
     # File-based hooks
@@ -1088,19 +1377,14 @@ def cmd_init(args):
 
     if eco == "python":
         venv = _find_venv()
-        if venv:
-            sc = _sitecustomize_path(venv)
-            existing = sc.read_text() if sc.exists() else ""
-            if "cygnus" not in existing.lower():
-                with open(sc, "a") as f:
-                    f.write("\n" + SITECUSTOMIZE_CONTENT)
-                print(f"  Installed sitecustomize.py: {sc}")
-            else:
-                print(f"  sitecustomize.py already configured: {sc}")
-            print(f"  Python resolution: ~/.cyg/python/ prepended to sys.path")
-        else:
-            print(f"  No virtualenv found. Activate one first, or run:")
-            print(f"    python -m venv .venv && source .venv/bin/activate && cyg init")
+        _install_pip_find_links(venv)
+        conf = _pip_conf_path(venv)
+        wheels_dir = CYGNUS_HOME / "python" / "wheels"
+        print(f"  Installed pip.conf: {conf}")
+        print(f"  pip find-links: {wheels_dir}")
+        print(f"  pip will check local wheels before downloading from PyPI.")
+        if not venv:
+            print(f"  (User-level — activate a virtualenv for project-scoped config)")
     elif eco and eco in HOOK_TEMPLATES:
         _install_hook(eco, use_global=use_global)
     elif eco:
@@ -1205,7 +1489,7 @@ def cmd_request(args):
         except Exception:
             detail = e.reason
         if e.code == 429:
-            print(f"  Daily priority request limit reached.", file=sys.stderr)
+            print(f"  {detail}", file=sys.stderr)
             print(f"  Check budget with: cyg status", file=sys.stderr)
         else:
             print(f"  Error: {detail}", file=sys.stderr)
@@ -1694,6 +1978,8 @@ def cmd_install(args):
 
         # Save manifest locally for `cyg list` / `cyg verify`
         (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+        _populate_wheels_dir(ecosystem, dest_file)
 
         print(f"\n  Installed: {library}@{version} for {_PLATFORM}")
         print(f"  Location:  {dest_dir}")
@@ -4066,6 +4352,9 @@ def cmd_auth_status(args):
         limit = usage.get("daily_limit", "?")
         remaining = usage.get("remaining_today", "?")
         print(f"  Today: {daily} requests (limit: {limit}, remaining: {remaining})")
+        prio_used = usage.get("priority_used_today", 0)
+        prio_limit = usage.get("priority_limit", "?")
+        print(f"  Priority queue: {prio_used}/{prio_limit} used today")
         monthly = usage.get("monthly_count", 0)
         print(f"  This month: {monthly} requests")
         # billing_active + limits_enforced are top-level server flags users
@@ -4118,6 +4407,29 @@ def cmd_uninstall(args):
     if confirm != "y":
         print("  Aborted.")
         return
+
+    # Remove pip.conf find-links (venv and user-level)
+    venv = _find_venv()
+    _remove_pip_find_links(venv)
+    if venv:
+        _remove_pip_find_links(None)  # also clean user-level
+    print(f"  ✓ Removed pip find-links configuration")
+
+    # Remove sitecustomize.py entry (legacy cleanup)
+    if venv:
+        sc = _sitecustomize_path(venv)
+        if sc.exists():
+            text = sc.read_text()
+            if "cygnus" in text.lower():
+                cleaned = "\n".join(
+                    l for l in text.splitlines()
+                    if "cygnus" not in l.lower() and "_cygnus" not in l
+                )
+                if cleaned.strip():
+                    sc.write_text(cleaned.strip() + "\n")
+                else:
+                    sc.unlink()
+                print(f"  ✓ Removed sitecustomize.py hook")
 
     # Remove ~/.cyg/ (and legacy ~/.cygnus/ if it still exists)
     import shutil
@@ -4497,6 +4809,10 @@ def cmd_cache(args):
         print(f"  TTL:        {CACHE_TTL}s ({CACHE_TTL // 3600}h)")
     else:
         print("  Usage: cyg cache [clear|status]")
+
+
+# ── Admin Commands (owner-only, hidden) ─────────────────────────────
+
 
 
 def _first_run_onboarding():
@@ -4944,13 +5260,7 @@ def _main_inner():
     p_issue.add_argument("--body", default=None,
                          help="Issue body (opens $EDITOR if not provided)")
 
-    # Intercept legacy flags before argparse — redirect to subcommands
-    if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
-        print(f"cyg {_cli_version}")
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] in ("--help", "-h"):
-        cmd_help(argparse.Namespace())
-        return
+    # `cyg admin <subcommand>` — owner-only, hidden
 
     args = parser.parse_args()
 
@@ -5013,9 +5323,6 @@ def _main_inner():
         cmd_deposit(args)
     elif args.command == "extension":
         cmd_extension(args)
-    else:
-        # First-run experience: no command → onboarding
-        _first_run_onboarding()
 
 
 if __name__ == "__main__":
