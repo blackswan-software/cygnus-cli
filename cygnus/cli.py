@@ -895,14 +895,7 @@ def _remove_pip_find_links(venv: Path = None):
 def _populate_wheels_dir(ecosystem: str, artifact_path: Path):
     """Register a downloaded artifact with the native package manager's cache.
 
-    Python: symlink .whl into ~/.cyg/python/wheels/ for pip find-links.
-    Node:   `npm cache add <tarball>` so npm finds it offline.
-    Ruby:   `gem install --local <gem>` into user gems.
-    Dart:   copy into pub system cache so `dart pub get` finds it.
-    Go:     extract into GOPROXY file:// directory layout.
-    Java/Kotlin: extract into Maven local repo layout.
-    Elixir: extract into ~/.cyg/elixir/<lib>/ for mix path deps.
-    Swift:  extract into ~/.cyg/swift/<lib>/ for SPM path deps.
+    All 15 ecosystems: artifact goes to the directory the resolution hook points at.
     """
     import subprocess
 
@@ -950,7 +943,22 @@ def _populate_wheels_dir(ecosystem: str, artifact_path: Path):
     elif ecosystem in ("java", "kotlin"):
         _populate_maven_repo(ecosystem, artifact_path)
 
-    elif ecosystem in ("elixir", "swift"):
+    elif ecosystem in ("elixir", "swift", "erlang"):
+        _extract_to_cache(ecosystem, artifact_path)
+
+    elif ecosystem == "rust":
+        _extract_to_cache(ecosystem, artifact_path)
+
+    elif ecosystem == "csharp":
+        _populate_nuget_cache(artifact_path)
+
+    elif ecosystem == "php":
+        _extract_to_cache(ecosystem, artifact_path)
+
+    elif ecosystem == "scala":
+        _populate_maven_repo(ecosystem, artifact_path)
+
+    elif ecosystem == "cpp":
         _extract_to_cache(ecosystem, artifact_path)
 
 
@@ -1068,6 +1076,31 @@ def _extract_to_cache(ecosystem: str, artifact_path: Path):
                 tf.extractall(dest, filter="data")
         except (tarfile.TarError, OSError):
             pass
+
+
+def _populate_nuget_cache(artifact_path: Path):
+    """Extract .nupkg files from artifact into ~/.cyg/csharp/ for NuGet local source.
+
+    The compiler bundles all .nupkg files (primary + transitive deps) into a
+    .tar.gz. NuGet local source expects .nupkg files flat in the source dir.
+    """
+    import tarfile
+
+    if artifact_path.suffix not in (".gz", ".tar"):
+        return
+
+    nuget_dir = CYGNUS_HOME / "csharp"
+    nuget_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with tarfile.open(artifact_path, "r:gz") as tf:
+            for member in tf.getmembers():
+                if member.name.endswith(".nupkg"):
+                    member.name = Path(member.name).name
+                    tf.extract(member, nuget_dir, filter="data")
+    except (tarfile.TarError, OSError):
+        _extract_to_cache("csharp", artifact_path)
+
 
 # Per-ecosystem resolution hook templates
 # Each hook tells the native package manager to check ~/.cyg/{eco}/ first.
@@ -1271,6 +1304,11 @@ resolvers += "cygnus" at "file://{cygnus_home}/scala"
 list(PREPEND CMAKE_PREFIX_PATH "{cygnus_home}/cpp")
 """,
         "description": "C/C++: CMAKE_PREFIX_PATH in CMakeLists.txt",
+    },
+    "erlang": {
+        "file": None,
+        "marker": "cygnus",
+        "description": "Erlang: extracted to ~/.cyg/erlang/<lib>/<ver>/src/ (add as path dep in rebar.config)",
     },
 }
 
