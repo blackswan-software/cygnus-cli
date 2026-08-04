@@ -18,10 +18,11 @@ Add four lines to your workflow to verify your dependencies on every CI run:
 ```yaml
 - uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2
   with:
+    api-key: ${{ secrets.CYGNUS_API_KEY }}
     ecosystem: npm   # or python, ruby, go, java, csharp, rust, etc. (omit to auto-detect)
 ```
 
-Fails the build on `SECURITY_ISSUE_DETECTED`. Pulls the CLI from the public CDN, verifies its SHA-256 against the published checksum, then runs `cygnus verify --ci` against your lockfile. No auth required for the free tier.
+Fails the build on `SECURITY_ISSUE_DETECTED`. Pulls the CLI from the public CDN, verifies its SHA-256 against the published checksum, then runs `cygnus verify --ci` against your lockfile. Pass your API key via the `api-key` input (sign up free at [blackswan-software.ai/signup](https://blackswan-software.ai/signup)).
 
 Pin to `@latest` for rolling updates, or pin to a specific tag (`@v0.1.2`) for reproducible runs.
 

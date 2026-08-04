@@ -6,6 +6,10 @@ branding:
   color: 'blue'
 
 inputs:
+  api-key:
+    description: 'Cygnus API key for authenticated access. Sign up free at https://blackswan-software.ai/signup. Store as a GitHub secret.'
+    required: false
+    default: ''
   ecosystem:
     description: 'Ecosystem to verify (auto-detected from lockfile if omitted): python, node, ruby, go, rust, java, csharp, php, kotlin, scala, swift, dart, elixir, erlang, cpp'
     required: false
@@ -64,6 +68,7 @@ runs:
     - name: Verify project dependencies
       shell: bash
       env:
+        CYGNUS_API_KEY: ${{ inputs.api-key }}
         ECOSYSTEM: ${{ inputs.ecosystem }}
         LIBRARY: ${{ inputs.library }}
       run: |
