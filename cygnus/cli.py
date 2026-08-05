@@ -71,7 +71,7 @@ CYGNUS_HOME = CYG_HOME
 def _validate_registry_url(url: str) -> str:
     """Reject non-HTTPS registry URLs (except localhost/file).
 
-    Why: CLI fetches signed artifacts + verified tokens from the registry.
+    Why: CLI fetches signed artifacts from the registry.
     HTTP allows a network attacker to inject malicious responses and
     poison the local cache. Localhost/file URLs are allowed for dev.
 
@@ -2107,7 +2107,7 @@ def cmd_lock(args):
                 if not ver_data:
                     all_entries.append({
                         "library": lib, "version": pinned, "ecosystem": ecosystem,
-                        "confidence": "NOT_COMPILED", "tokens": 0, "signed": False, "cves": 0,
+                        "confidence": "NOT_COMPILED", "signed": False, "cves": 0,
                     })
                     continue
             else:
@@ -2116,12 +2116,10 @@ def cmd_lock(args):
             if not version:
                 all_entries.append({
                     "library": lib, "version": "unknown", "ecosystem": ecosystem,
-                    "confidence": "NOT_COMPILED", "tokens": 0, "signed": False, "cves": 0,
+                    "confidence": "NOT_COMPILED", "signed": False, "cves": 0,
                 })
                 continue
 
-            token_data = _api_ext(f"/tokens/{ecosystem}/{lib}/{version}")
-            token_count = token_data.get("token_count", 0) if token_data else 0
             confidence = ver_data.get("confidence") or "ATTESTATION_ONLY"
 
             manifest = _api(f"/manifest/{ecosystem}/{lib_encoded}/{version}")
@@ -2133,7 +2131,7 @@ def cmd_lock(args):
 
             entry = {
                 "library": lib, "version": version, "ecosystem": ecosystem,
-                "confidence": confidence, "tokens": token_count,
+                "confidence": confidence,
                 "signed": signed, "cves": cve_count,
             }
 
@@ -2176,7 +2174,7 @@ def cmd_lock(args):
         lines.append(
             f"{e['library']}=={e['version']}  "
             f"ecosystem={e['ecosystem']}  "
-            f"confidence={e['confidence']}  tokens={e['tokens']}  "
+            f"confidence={e['confidence']}  "
             f"signed={'yes' if e['signed'] else 'no'}  "
             f"grade={grade}{cve_flag}{integrity}"
         )
@@ -3204,7 +3202,6 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
 
     version = data["version"]
     confidence = data.get("confidence", "ATTESTATION_ONLY")
-    token_count = data.get("tokens", 0)
     functions = data.get("functions", [])
     signed = data.get("signed", False)
     signature = data.get("signature")
@@ -3226,7 +3223,7 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     print(f"\n  {ecosystem}/{library}@{version}")
     print(f"  {'─' * 40}")
     print(f"  Confidence:  {confidence} {grade}")
-    print(f"  Tokens:      {token_count} verified function signatures" if token_count else "  Tokens:      not extracted yet")
+    print(f"  Functions:   {len(functions)} verified" if functions else "  Functions:   pending verification")
     if functions:
         names = [f["function"] if isinstance(f, dict) else f for f in functions[:5]]
         print(f"  Functions:   {', '.join(names)}")
@@ -3284,7 +3281,7 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
     print()
 
     return {
-        "confidence": confidence, "version": version, "tokens": token_count,
+        "confidence": confidence, "version": version,
         "signed": signed, "cve_count": len(advisories), "advisories": advisories,
     }
 
@@ -3757,7 +3754,6 @@ def _verify_project(ecosystem: str, deps: list[str], ci_mode: bool):
                     results[lib] = {
                         "confidence": "VERIFIED",
                         "version": br.get("version", "?"),
-                        "tokens": br.get("token_count", 0),
                     }
                 else:
                     results[lib] = {"confidence": "NOT_COMPILED", "version": None}
@@ -4931,7 +4927,7 @@ def _parse_cygnus_lock() -> list[dict]:
         if not lib:
             continue
         entry = {"library": lib, "version": None, "ecosystem": None,
-                 "confidence": None, "tokens": 0, "signed": False,
+                 "confidence": None, "signed": False,
                  "grade": None, "cves": 0, "sha256": None,
                  "signature": None, "key_id": None}
         if len(parts) > 1:
