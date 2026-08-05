@@ -2,7 +2,7 @@
   "name": "cygnus",
   "displayName": "Cygnus — Dependency Verification",
   "description": "Inline verification status for library imports. Shows confidence grades, CVEs, and signing status.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "blackswan-software",
   "repository": {
     "type": "git",
