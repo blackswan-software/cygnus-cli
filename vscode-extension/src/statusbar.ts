@@ -15,24 +15,31 @@ export class StatusBarManager {
         context.subscriptions.push(this.item);
     }
 
-    update(verified: number, total: number) {
+    update(verified: number, total: number, cveCount: number = 0) {
         if (total === 0) {
             this.item.text = '$(shield) Cygnus';
             this.item.tooltip = 'No imports detected';
+            this.item.backgroundColor = undefined;
             return;
         }
 
-        const pct = Math.round(verified / total * 100);
-        if (verified === total) {
+        if (cveCount > 0) {
+            this.item.text = `$(shield) Cygnus: ${verified}/${total} · $(warning) ${cveCount} CVE${cveCount !== 1 ? 's' : ''}`;
+            this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+            this.item.tooltip = `${verified}/${total} verified · ${cveCount} CVE${cveCount !== 1 ? 's' : ''} found — click to verify`;
+        } else if (verified === total) {
             this.item.text = `$(shield) Cygnus: ${verified}/${total} ✓`;
             this.item.backgroundColor = undefined;
-            this.item.tooltip = `All ${total} dependencies verified`;
+            this.item.tooltip = `All ${total} dependencies verified · 0 CVEs`;
         } else {
             const missing = total - verified;
             this.item.text = `$(shield) Cygnus: ${verified}/${total}`;
             this.item.tooltip = `${missing} unverified — click to trigger compilation`;
+            const pct = Math.round(verified / total * 100);
             if (pct < 70) {
                 this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            } else {
+                this.item.backgroundColor = undefined;
             }
         }
     }

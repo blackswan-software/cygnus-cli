@@ -1,13 +1,29 @@
 import * as https from 'https';
 import * as http from 'http';
 
+export interface CveInfo {
+    count: number;
+    advisories: string[];
+    riskFlags: string[];
+    depsDevUrl: string;
+}
+
 export interface VerifyResult {
     library: string;
     version: string;
+    ecosystem: string;
     confidence: string;
-    tokenCount: number;
+    grade: string;
+    functionCount: number;
     signed: boolean;
+    signatureAlgorithm: string;
+    license: string;
+    cves: CveInfo;
+    sbomUrl: string;
+    verifyUrl: string;
 }
+
+const EMPTY_CVES: CveInfo = { count: 0, advisories: [], riskFlags: [], depsDevUrl: '' };
 
 export class CygnusClient {
     private baseUrl: string;
@@ -19,28 +35,38 @@ export class CygnusClient {
     }
 
     async verify(ecosystem: string, library: string): Promise<VerifyResult> {
-        const data = await this.get(`/versions/${ecosystem}/${library}/latest`);
-        if (!data || !data.version) {
+        const data = await this.get(`/lookup/${ecosystem}/${library}`);
+        if (!data || !data.version || data.detail) {
             this.triggerCompilation(ecosystem, library);
-            return { library, version: '', confidence: '', tokenCount: 0, signed: false };
+            return {
+                library, version: '', ecosystem, confidence: '', grade: '',
+                functionCount: 0, signed: false, signatureAlgorithm: '',
+                license: '', cves: { ...EMPTY_CVES }, sbomUrl: '', verifyUrl: '',
+            };
         }
 
         return {
             library,
             version: data.version,
+            ecosystem: data.ecosystem || ecosystem,
             confidence: data.confidence || 'COMPILED',
-            tokenCount: data.function_count || 0,
+            grade: data.grade || '',
+            functionCount: data.tokens || 0,
             signed: data.signed || false,
+            signatureAlgorithm: data.signature?.algorithm || '',
+            license: data.license || '',
+            cves: {
+                count: data.cves?.cve_count || 0,
+                advisories: data.cves?.advisories || [],
+                riskFlags: data.cves?.risk_flags || [],
+                depsDevUrl: data.cves?.deps_dev_url || '',
+            },
+            sbomUrl: data.sbom_url || '',
+            verifyUrl: data.verify_url || '',
         };
     }
 
-    /**
-     * Auto-trigger compilation for missing libraries.
-     * When 23/25 deps are verified and 2 are missing, we don't just show
-     * "not found" — we fix it by queuing compilation immediately.
-     */
     private async triggerCompilation(ecosystem: string, library: string) {
-        // Queue via compiler endpoint (priority=1 for on-demand)
         await this.post('/compile/queue', {
             ecosystem,
             library,
@@ -51,8 +77,6 @@ export class CygnusClient {
     }
 
     async batchVerify(ecosystem: string, libraries: string[]): Promise<VerifyResult[]> {
-        // TODO: use batch endpoint when available
-        // For now, parallel individual lookups (limited to 10 concurrent)
         const results: VerifyResult[] = [];
         const chunks = [];
         for (let i = 0; i < libraries.length; i += 10) {

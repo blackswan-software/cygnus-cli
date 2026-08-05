@@ -31,6 +31,16 @@ const MISSING_DECORATION = vscode.window.createTextEditorDecorationType({
     },
 });
 
+const CVE_DECORATION = vscode.window.createTextEditorDecorationType({
+    after: {
+        contentText: ' ⚠ CVEs found',
+        color: '#f87171',
+        fontStyle: 'italic',
+        fontWeight: 'bold',
+        margin: '0 0 0 12px',
+    },
+});
+
 export class InlineDecorator {
     update(
         editor: vscode.TextEditor,
@@ -41,12 +51,11 @@ export class InlineDecorator {
         const verified: vscode.DecorationOptions[] = [];
         const partial: vscode.DecorationOptions[] = [];
         const missing: vscode.DecorationOptions[] = [];
+        const cveWarnings: vscode.DecorationOptions[] = [];
 
-        const text = doc.getText();
-        const lines = text.split('\n');
+        const lines = doc.getText().split('\n');
 
         for (const result of results) {
-            // Find the line containing this import
             const lineIdx = this.findImportLine(lines, result.library, doc.languageId);
             if (lineIdx < 0) continue;
 
@@ -59,28 +68,45 @@ export class InlineDecorator {
                 hoverMessage: hoverMsg,
             };
 
-            if (result.confidence === 'FULLY_VERIFIED') {
+            if (!result.confidence) {
+                missing.push(decoration);
+            } else if (result.cves.count > 0) {
+                cveWarnings.push({
+                    ...decoration,
+                    renderOptions: {
+                        after: {
+                            contentText: ` ⚠ ${result.grade || '?'} · ${result.cves.count} CVE${result.cves.count !== 1 ? 's' : ''}`,
+                            color: '#f87171',
+                            fontStyle: 'italic',
+                            fontWeight: 'bold',
+                            margin: '0 0 0 12px',
+                        },
+                    },
+                });
+            } else if (result.confidence === 'FULLY_VERIFIED') {
                 verified.push({
                     ...decoration,
                     renderOptions: {
                         after: {
-                            contentText: ` ✓ ${result.tokenCount} functions verified`,
+                            contentText: ` ✓ ${result.grade || 'A'} · ${result.functionCount} functions`,
+                            color: '#4ade80',
+                            fontStyle: 'italic',
+                            margin: '0 0 0 12px',
                         },
                     },
                 });
             } else if (result.confidence === 'TESTS_PASS' || result.confidence === 'VERIFIED_PARTIAL') {
                 partial.push(decoration);
-            } else if (!result.confidence) {
-                missing.push(decoration);
             }
         }
 
         editor.setDecorations(VERIFIED_DECORATION, verified);
         editor.setDecorations(PARTIAL_DECORATION, partial);
         editor.setDecorations(MISSING_DECORATION, missing);
+        editor.setDecorations(CVE_DECORATION, cveWarnings);
     }
 
-    private findImportLine(lines: string[], library: string, languageId: string): number {
+    findImportLine(lines: string[], library: string, languageId: string): number {
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].toLowerCase();
             if (line.includes(library.toLowerCase()) &&
@@ -95,23 +121,59 @@ export class InlineDecorator {
         const md = new vscode.MarkdownString();
         md.isTrusted = true;
 
-        if (result.confidence === 'FULLY_VERIFIED') {
-            md.appendMarkdown(`**Cygnus: ✓ FULLY_VERIFIED**\n\n`);
-            md.appendMarkdown(`- Library: \`${result.library}@${result.version}\`\n`);
-            md.appendMarkdown(`- Functions: ${result.tokenCount} verified\n`);
-            md.appendMarkdown(`- Signed: ${result.signed ? 'Ed25519 ✓' : 'unsigned'}\n`);
-            md.appendMarkdown(`\n[View on Cygnus](https://cygnus.blackswan-software.ai/verify/python/${result.library})`);
-        } else if (!result.confidence) {
+        if (!result.confidence) {
             md.appendMarkdown(`**Cygnus: ✗ Not verified**\n\n`);
             md.appendMarkdown(`\`${result.library}\` is not in the Cygnus registry.\n\n`);
-            md.appendMarkdown(`[Trigger compilation](command:cygnus.verifyLibrary) — takes ~5 minutes.`);
+            md.appendMarkdown(`[Request verification](command:cygnus.request) — typically completes within hours.`);
+            return md;
+        }
+
+        const icon = this.gradeIcon(result.grade);
+        md.appendMarkdown(`**Cygnus: ${icon} Grade ${result.grade} — ${result.confidence}**\n\n`);
+        md.appendMarkdown(`- Library: \`${result.library}@${result.version}\`\n`);
+        md.appendMarkdown(`- Functions: ${result.functionCount} verified\n`);
+
+        if (result.signed) {
+            md.appendMarkdown(`- Signed: ${result.signatureAlgorithm || 'Ed25519'} ✓\n`);
         } else {
-            md.appendMarkdown(`**Cygnus: ⚠ ${result.confidence}**\n\n`);
-            md.appendMarkdown(`- Library: \`${result.library}@${result.version}\`\n`);
-            md.appendMarkdown(`- Functions: ${result.tokenCount} partially verified\n`);
-            md.appendMarkdown(`- Not all functions verified yet.`);
+            md.appendMarkdown(`- Signed: unsigned\n`);
+        }
+
+        if (result.license) {
+            md.appendMarkdown(`- License: ${result.license}\n`);
+        }
+
+        if (result.cves.count > 0) {
+            md.appendMarkdown(`\n---\n\n`);
+            md.appendMarkdown(`**⚠ ${result.cves.count} CVE${result.cves.count !== 1 ? 's' : ''} found:**\n\n`);
+            for (const cve of result.cves.advisories.slice(0, 5)) {
+                md.appendMarkdown(`- \`${cve}\`\n`);
+            }
+            if (result.cves.advisories.length > 5) {
+                md.appendMarkdown(`- _...and ${result.cves.advisories.length - 5} more_\n`);
+            }
+            if (result.cves.riskFlags.length > 0) {
+                md.appendMarkdown(`\nRisk: ${result.cves.riskFlags.join(', ')}\n`);
+            }
+            if (result.cves.depsDevUrl) {
+                md.appendMarkdown(`\n[View on deps.dev](${result.cves.depsDevUrl})\n`);
+            }
+        } else {
+            md.appendMarkdown(`- CVEs: 0 known ✓\n`);
         }
 
         return md;
+    }
+
+    private gradeIcon(grade: string): string {
+        switch (grade) {
+            case 'A': return '✓';
+            case 'B': return '✓';
+            case 'C': return '⚠';
+            case 'D': return '⚠';
+            case 'F': return '✗';
+            case 'BLOCKED': return '🚫';
+            default: return '?';
+        }
     }
 }

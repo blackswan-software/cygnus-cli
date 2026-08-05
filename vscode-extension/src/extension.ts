@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CygnusClient } from './client';
+import { CygnusClient, VerifyResult } from './client';
 import { ImportScanner } from './scanner';
 import { StatusBarManager } from './statusbar';
 import { InlineDecorator } from './decorator';
@@ -11,18 +11,8 @@ let client: CygnusClient;
 let scanner: ImportScanner;
 let statusBar: StatusBarManager;
 let decorator: InlineDecorator;
+let diagnosticCollection: vscode.DiagnosticCollection;
 
-/**
- * Resolve the API key with the same precedence chain as the `cygnus` CLI:
- *   1. VS Code setting `cygnus.apiKey` (explicit override)
- *   2. `CYGNUS_API_KEY` environment variable
- *   3. `~/.cygnus/config.json` `api_key` field — written by `cygnus auth login`
- *   4. empty (free-tier mode)
- *
- * Returning the same key the CLI uses lets a user run `cygnus auth login`
- * once and the extension picks up the session automatically — no manual
- * paste into VS Code settings required. Exported for the e2e test suite.
- */
 export function resolveApiKey(): string {
     const fromSetting = vscode.workspace
         .getConfiguration('cygnus')
@@ -61,29 +51,31 @@ export function activate(context: vscode.ExtensionContext) {
     scanner = new ImportScanner();
     statusBar = new StatusBarManager();
     decorator = new InlineDecorator();
+    diagnosticCollection = vscode.languages.createDiagnosticCollection('cygnus');
 
-    // Register commands
     context.subscriptions.push(
+        diagnosticCollection,
         vscode.commands.registerCommand('cygnus.verify', () => verifyCurrentFile()),
         vscode.commands.registerCommand('cygnus.verifyLibrary', () => verifyLibraryPrompt()),
         vscode.commands.registerCommand('cygnus.request', () => requestVerification()),
     );
 
-    // Auto-verify on file open/save
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => {
             if (editor && config.get<boolean>('showInlineStatus')) {
                 verifyCurrentFile();
             }
         }),
-        vscode.workspace.onDidSaveTextDocument(doc => {
+        vscode.workspace.onDidSaveTextDocument(() => {
             if (config.get<boolean>('showInlineStatus')) {
                 verifyCurrentFile();
             }
         }),
+        vscode.workspace.onDidCloseTextDocument(doc => {
+            diagnosticCollection.delete(doc.uri);
+        }),
     );
 
-    // Initial verification
     if (vscode.window.activeTextEditor) {
         verifyCurrentFile();
     }
@@ -97,21 +89,77 @@ async function verifyCurrentFile() {
 
     const doc = editor.document;
     const ecosystem = scanner.detectEcosystem(doc.languageId);
-    if (!ecosystem) return;
+    if (!ecosystem) {
+        diagnosticCollection.delete(doc.uri);
+        return;
+    }
 
     const imports = scanner.extractImports(doc.getText(), ecosystem);
-    if (imports.length === 0) return;
+    if (imports.length === 0) {
+        diagnosticCollection.delete(doc.uri);
+        return;
+    }
 
-    // Batch lookup
     const results = await client.batchVerify(ecosystem, imports);
 
-    // Update decorations
     decorator.update(editor, doc, imports, results);
+    updateDiagnostics(doc, results);
 
-    // Update status bar
     const verified = results.filter(r => r.confidence === 'FULLY_VERIFIED').length;
     const total = results.length;
-    statusBar.update(verified, total);
+    const cveCount = results.reduce((sum, r) => sum + r.cves.count, 0);
+    statusBar.update(verified, total, cveCount);
+}
+
+function updateDiagnostics(doc: vscode.TextDocument, results: VerifyResult[]) {
+    const diagnostics: vscode.Diagnostic[] = [];
+    const lines = doc.getText().split('\n');
+
+    for (const result of results) {
+        const lineIdx = decorator.findImportLine(lines, result.library, doc.languageId);
+        if (lineIdx < 0) continue;
+
+        const line = doc.lineAt(lineIdx);
+
+        if (result.cves.count > 0) {
+            const cveList = result.cves.advisories.slice(0, 3).join(', ');
+            const extra = result.cves.count > 3 ? ` (+${result.cves.count - 3} more)` : '';
+            const diag = new vscode.Diagnostic(
+                line.range,
+                `${result.library}@${result.version}: ${result.cves.count} CVE${result.cves.count !== 1 ? 's' : ''} — ${cveList}${extra}`,
+                result.cves.count >= 5
+                    ? vscode.DiagnosticSeverity.Error
+                    : vscode.DiagnosticSeverity.Warning,
+            );
+            diag.source = 'Cygnus';
+            diag.code = 'cve';
+            diagnostics.push(diag);
+        }
+
+        if (!result.confidence) {
+            const diag = new vscode.Diagnostic(
+                line.range,
+                `${result.library}: not in Cygnus registry — verification queued`,
+                vscode.DiagnosticSeverity.Information,
+            );
+            diag.source = 'Cygnus';
+            diag.code = 'unverified';
+            diagnostics.push(diag);
+        }
+
+        if (result.grade === 'D' || result.grade === 'F' || result.grade === 'BLOCKED') {
+            const diag = new vscode.Diagnostic(
+                line.range,
+                `${result.library}@${result.version}: Grade ${result.grade} — low verification confidence`,
+                vscode.DiagnosticSeverity.Warning,
+            );
+            diag.source = 'Cygnus';
+            diag.code = 'low-grade';
+            diagnostics.push(diag);
+        }
+    }
+
+    diagnosticCollection.set(doc.uri, diagnostics);
 }
 
 async function verifyLibraryPrompt() {
@@ -129,12 +177,15 @@ async function verifyLibraryPrompt() {
 
     const result = await client.verify(ecosystem, input);
     if (result.confidence === 'FULLY_VERIFIED') {
+        const cveNote = result.cves.count > 0
+            ? ` · ⚠ ${result.cves.count} CVEs`
+            : ' · 0 CVEs';
         vscode.window.showInformationMessage(
-            `✓ ${input}: FULLY_VERIFIED (${result.tokenCount} functions verified)`
+            `✓ ${input}: Grade ${result.grade} — ${result.functionCount} functions verified${cveNote}`
         );
     } else if (result.confidence) {
         vscode.window.showWarningMessage(
-            `⚠ ${input}: ${result.confidence}`
+            `⚠ ${input}: ${result.confidence} (Grade ${result.grade})`
         );
     } else {
         vscode.window.showErrorMessage(`✗ ${input}: not in Cygnus registry`);
