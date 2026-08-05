@@ -64,7 +64,7 @@ export class InlineDecorator {
                     ...decoration,
                     renderOptions: {
                         after: {
-                            contentText: ` ✓ ${result.tokenCount} tokens`,
+                            contentText: ` ✓ ${result.tokenCount} functions verified`,
                         },
                     },
                 });
@@ -98,7 +98,7 @@ export class InlineDecorator {
         if (result.confidence === 'FULLY_VERIFIED') {
             md.appendMarkdown(`**Cygnus: ✓ FULLY_VERIFIED**\n\n`);
             md.appendMarkdown(`- Library: \`${result.library}@${result.version}\`\n`);
-            md.appendMarkdown(`- Tokens: ${result.tokenCount} verified functions\n`);
+            md.appendMarkdown(`- Functions: ${result.tokenCount} verified\n`);
             md.appendMarkdown(`- Signed: ${result.signed ? 'Ed25519 ✓' : 'unsigned'}\n`);
             md.appendMarkdown(`\n[View on Cygnus](https://cygnus.blackswan-software.ai/verify/python/${result.library})`);
         } else if (!result.confidence) {
@@ -108,7 +108,7 @@ export class InlineDecorator {
         } else {
             md.appendMarkdown(`**Cygnus: ⚠ ${result.confidence}**\n\n`);
             md.appendMarkdown(`- Library: \`${result.library}@${result.version}\`\n`);
-            md.appendMarkdown(`- Tokens: ${result.tokenCount} functions\n`);
+            md.appendMarkdown(`- Functions: ${result.tokenCount} partially verified\n`);
             md.appendMarkdown(`- Not all functions verified yet.`);
         }
 

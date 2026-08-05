@@ -66,8 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('cygnus.verify', () => verifyCurrentFile()),
         vscode.commands.registerCommand('cygnus.verifyLibrary', () => verifyLibraryPrompt()),
-        vscode.commands.registerCommand('cygnus.showTokens', () => showTokens()),
-        vscode.commands.registerCommand('cygnus.compose', () => composeTokens()),
+        vscode.commands.registerCommand('cygnus.request', () => requestVerification()),
     );
 
     // Auto-verify on file open/save
@@ -131,77 +130,40 @@ async function verifyLibraryPrompt() {
     const result = await client.verify(ecosystem, input);
     if (result.confidence === 'FULLY_VERIFIED') {
         vscode.window.showInformationMessage(
-            `✓ ${input}: FULLY_VERIFIED (${result.tokenCount} tokens)`
+            `✓ ${input}: FULLY_VERIFIED (${result.tokenCount} functions verified)`
         );
     } else if (result.confidence) {
         vscode.window.showWarningMessage(
-            `⚠ ${input}: ${result.confidence} (${result.tokenCount} tokens)`
+            `⚠ ${input}: ${result.confidence}`
         );
     } else {
         vscode.window.showErrorMessage(`✗ ${input}: not in Cygnus registry`);
     }
 }
 
-async function showTokens() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) return;
+async function requestVerification() {
+    const input = await vscode.window.showInputBox({
+        prompt: 'Library name to request verification for',
+        placeHolder: 'e.g. requests, lodash, gin',
+    });
+    if (!input) return;
 
-    const word = editor.document.getText(editor.selection).trim();
-    if (!word) {
-        vscode.window.showInformationMessage('Select a function name first');
-        return;
-    }
-
-    const ecosystem = scanner.detectEcosystem(editor.document.languageId);
+    const ecosystem = await vscode.window.showQuickPick(
+        ['python', 'node', 'go', 'rust', 'java', 'csharp', 'ruby', 'php', 'kotlin', 'scala', 'swift', 'dart', 'elixir', 'cpp'],
+        { placeHolder: 'Select ecosystem' }
+    );
     if (!ecosystem) return;
 
-    // Extract library from the word context
-    const tokens = await client.lookupFunction(ecosystem, word);
-    if (tokens) {
-        const panel = vscode.window.createWebviewPanel(
-            'cygnusTokens', `Cygnus: ${word}`,
-            vscode.ViewColumn.Beside, {}
+    const result = await client.verify(ecosystem, input);
+    if (result.confidence === 'FULLY_VERIFIED') {
+        vscode.window.showInformationMessage(
+            `✓ ${input}: already FULLY_VERIFIED`
         );
-        panel.webview.html = formatTokenHtml(tokens);
+    } else {
+        vscode.window.showInformationMessage(
+            `⟳ ${input}: verification requested — typically completes within hours`
+        );
     }
-}
-
-async function composeTokens() {
-    const task = await vscode.window.showInputBox({
-        prompt: 'Describe what you want to build',
-        placeHolder: 'e.g. flask API with auth and PostgreSQL',
-    });
-    if (!task) return;
-
-    const result = await client.compose(task);
-    const panel = vscode.window.createWebviewPanel(
-        'cygnusCompose', `Cygnus: ${task}`,
-        vscode.ViewColumn.Beside, {}
-    );
-    panel.webview.html = formatComposeHtml(result);
-}
-
-function formatTokenHtml(token: any): string {
-    return `<html><body style="font-family:monospace;padding:16px;background:#1e1e1e;color:#d4d4d4">
-        <h2 style="color:#4ec9b0">${token.function}</h2>
-        <p><strong>Signature:</strong> ${token.signature}</p>
-        <p><strong>Confidence:</strong> <span style="color:#4ade80">${token.confidence}</span></p>
-        <p><strong>Docstring:</strong> ${token.docstring || 'none'}</p>
-    </body></html>`;
-}
-
-function formatComposeHtml(result: any): string {
-    const libs = (result.libraries || []).map((l: any) =>
-        `<div style="margin:8px 0;padding:8px;border-left:3px solid #4ec9b0">
-            <strong>${l.library}</strong> (${l.ecosystem}) — ${l.available_tokens} tokens
-            <div style="color:#888;font-size:12px">${(l.matched_functions || []).join(', ')}</div>
-        </div>`
-    ).join('');
-    return `<html><body style="font-family:monospace;padding:16px;background:#1e1e1e;color:#d4d4d4">
-        <h2 style="color:#4ec9b0">Token Composition</h2>
-        <p style="color:#888">Task: ${result.task}</p>
-        ${libs}
-    </body></html>`;
 }
 
 export function deactivate() {

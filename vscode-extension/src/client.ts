@@ -21,20 +21,15 @@ export class CygnusClient {
     async verify(ecosystem: string, library: string): Promise<VerifyResult> {
         const data = await this.get(`/versions/${ecosystem}/${library}/latest`);
         if (!data || !data.version) {
-            // Library not compiled — auto-queue compilation via immediate route
             this.triggerCompilation(ecosystem, library);
             return { library, version: '', confidence: '', tokenCount: 0, signed: false };
         }
 
-        const version = data.version;
-        const tokens = await this.get(`/tokens/${ecosystem}/${library}/${version}`);
-        const tokenCount = tokens?.functions?.length || 0;
-
         return {
             library,
-            version,
-            confidence: data.confidence || (tokenCount > 0 ? 'COMPILED' : ''),
-            tokenCount,
+            version: data.version,
+            confidence: data.confidence || 'COMPILED',
+            tokenCount: data.function_count || 0,
             signed: data.signed || false,
         };
     }
@@ -70,25 +65,6 @@ export class CygnusClient {
             results.push(...batch);
         }
         return results;
-    }
-
-    async lookupFunction(ecosystem: string, functionName: string): Promise<any> {
-        // Try to extract library from function name (e.g. "requests.get" → requests)
-        const parts = functionName.split('.');
-        const library = parts[0];
-        const fname = parts.slice(1).join('.') || parts[0];
-
-        const data = await this.get(`/versions/${ecosystem}/${library}/latest`);
-        if (!data?.version) return null;
-
-        const token = await this.get(`/token/${ecosystem}/${library}/${data.version}/${fname}`);
-        return token;
-    }
-
-    async compose(task: string): Promise<any> {
-        // MCP compose endpoint
-        const data = await this.post('/mcp/compose', { task });
-        return data;
     }
 
     private async get(path: string): Promise<any> {

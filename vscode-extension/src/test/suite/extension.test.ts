@@ -6,7 +6,7 @@
  * the extension promises:
  *
  *   1. Extension activates without errors
- *   2. Four `cygnus.*` commands are registered with VS Code
+ *   2. Three `cygnus.*` commands are registered with VS Code
  *   3. Configuration properties (apiKey, registryUrl, etc.) exist on the
  *      `cygnus` namespace
  *   4. The auth-key resolver picks up `~/.cygnus/config.json` `api_key`
@@ -25,8 +25,7 @@ const EXTENSION_ID = 'blackswan-software.cygnus';
 const EXPECTED_COMMANDS = [
     'cygnus.verify',
     'cygnus.verifyLibrary',
-    'cygnus.showTokens',
-    'cygnus.compose',
+    'cygnus.request',
 ];
 
 suite('cygnus extension — e2e', () => {
@@ -37,7 +36,7 @@ suite('cygnus extension — e2e', () => {
         assert.strictEqual(ext.isActive, true, 'extension failed to activate');
     });
 
-    test('All four cygnus.* commands are registered', async () => {
+    test('All three cygnus.* commands are registered', async () => {
         const ext = vscode.extensions.getExtension(EXTENSION_ID);
         assert.ok(ext);
         await ext.activate();

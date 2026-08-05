@@ -1,7 +1,7 @@
 {
   "name": "cygnus",
-  "displayName": "Cygnus — Verified API Tokens",
-  "description": "Inline verification status for library imports. Shows verified function signatures, confidence levels, and token counts.",
+  "displayName": "Cygnus — Dependency Verification",
+  "description": "Inline verification status for library imports. Shows confidence grades, CVEs, and signing status.",
   "version": "0.1.0",
   "publisher": "blackswan-software",
   "repository": {
@@ -14,7 +14,7 @@
     "node": ">=18.0.0"
   },
   "categories": ["Programming Languages", "Linters", "Other"],
-  "keywords": ["cygnus", "verification", "api", "tokens", "security", "supply-chain"],
+  "keywords": ["cygnus", "verification", "api", "security", "supply-chain"],
   "activationEvents": [
     "onLanguage:python",
     "onLanguage:javascript",
@@ -43,12 +43,8 @@
         "title": "Cygnus: Verify Library..."
       },
       {
-        "command": "cygnus.showTokens",
-        "title": "Cygnus: Show Function Tokens"
-      },
-      {
-        "command": "cygnus.compose",
-        "title": "Cygnus: Compose Token Graph"
+        "command": "cygnus.request",
+        "title": "Cygnus: Request Verification for Library"
       }
     ],
     "configuration": {
