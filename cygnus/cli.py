@@ -4848,73 +4848,6 @@ def cmd_cache(args):
 # ── Admin Commands (owner-only, hidden) ─────────────────────────────
 
 
-def _require_founder_env() -> str:
-    key = os.environ.get("CYGNUS_ADMIN_KEY", "")
-    if not key:
-        print("  Error: CYGNUS_ADMIN_KEY env var required for admin commands.", file=sys.stderr)
-        print("  Export CYGNUS_ADMIN_KEY=<your-founder-key> and retry.", file=sys.stderr)
-        sys.exit(1)
-    return key
-
-
-def _admin_api(method: str, path: str, body: dict | None = None) -> dict | None:
-    auth_url = os.environ.get("CYGNUS_AUTH_URL", "https://auth.blackswan-software.ai")
-    founder_key = _require_founder_env()
-    url = f"{auth_url}{path}"
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("User-Agent", "cygnus-cli/1.0")
-    req.add_header("X-Api-Key", founder_key)
-    if data:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode()).get("detail", e.reason)
-        except Exception:
-            detail = e.reason
-        print(f"  Error ({e.code}): {detail}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"  Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def cmd_admin(args):
-    sub = getattr(args, "admin_command", None)
-    if sub == "setup-2fa":
-        cmd_admin_setup_2fa(args)
-    else:
-        print("  Usage: cyg admin setup-2fa")
-        print("  All user management is in the dashboard USERS tab.")
-
-
-def cmd_admin_setup_2fa(args):
-    """One-time TOTP enrollment for dashboard admin actions."""
-    data = _admin_api("POST", "/auth/admin/totp/setup", {})
-    if not data:
-        return
-    secret = data.get("secret", "")
-    uri = data.get("provisioning_uri", "")
-    print("\n  TOTP Enrollment")
-    print("  ─────────────────────────────────────")
-    print(f"  Secret: {secret}")
-    print(f"\n  Provisioning URI (scan as QR or paste into authenticator):")
-    print(f"  {uri}")
-    print()
-    code = input("  Enter code from authenticator app: ").strip()
-    if not code:
-        print("  Cancelled.", file=sys.stderr)
-        sys.exit(1)
-    result = _admin_api("POST", "/auth/admin/totp/verify-setup", {"code": code})
-    if result and result.get("enrolled"):
-        print("  TOTP enrolled. Use your authenticator app for dashboard admin actions.")
-    else:
-        print("  Verification failed — check your authenticator app and retry.", file=sys.stderr)
-        sys.exit(1)
-
 
 def _first_run_onboarding():
     """First-run experience when user runs `cygnus` with no args."""
@@ -5362,17 +5295,6 @@ def _main_inner():
                          help="Issue body (opens $EDITOR if not provided)")
 
     # `cyg admin <subcommand>` — owner-only, hidden
-    p_admin = sub.add_parser("admin", help=argparse.SUPPRESS)
-    admin_sub = p_admin.add_subparsers(dest="admin_command")
-    admin_sub.add_parser("setup-2fa", help="Enroll TOTP for dashboard admin")
-
-    # Intercept legacy flags before argparse — redirect to subcommands
-    if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
-        print(f"cyg {_cli_version}")
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] in ("--help", "-h"):
-        cmd_help(argparse.Namespace())
-        return
 
     args = parser.parse_args()
 
@@ -5435,11 +5357,6 @@ def _main_inner():
         cmd_deposit(args)
     elif args.command == "extension":
         cmd_extension(args)
-    elif args.command == "admin":
-        cmd_admin(args)
-    else:
-        # First-run experience: no command → onboarding
-        _first_run_onboarding()
 
 
 if __name__ == "__main__":
