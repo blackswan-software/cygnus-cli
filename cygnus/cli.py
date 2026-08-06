@@ -4386,7 +4386,7 @@ def cmd_auth_status(args):
         limit = usage.get("daily_limit", "?")
         remaining = usage.get("remaining_today", "?")
         print(f"  Today: {daily} requests (limit: {limit}, remaining: {remaining})")
-        prio_used = usage.get("priority_used_today", 0)
+        prio_used = usage.get("priority_used_this_month", 0)
         prio_limit = usage.get("priority_limit", "?")
         print(f"  Priority queue: {prio_used}/{prio_limit} used this month")
         monthly = usage.get("monthly_count", 0)
