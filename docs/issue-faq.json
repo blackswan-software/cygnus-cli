@@ -71,14 +71,14 @@
       "pattern": "(?i)(more tokens|add tokens|top.?up|recharge|add.*balance|add.*credit|out of tokens|ran out|usage limit|rate.?limit|deposit more|exceeded.*(?:daily )?limit|out of.*verif|need more.*(?:than|per)|increase.*quota)",
       "label": "question/billing",
       "close": true,
-      "reply": "The free tier includes **100 lookups per day** \u2014 no payment needed, no expiry.\n\nIf you're hitting the daily limit:\n- Wait until midnight UTC (counter resets automatically)\n- Upgrade to Pro ($10 deposit, 5,000 lookups/day) when available\n- Or email <support@blackswan-software.ai> if you need higher limits for a specific project\n\nClosing \u2014 reopen if you need higher limits for your use case."
+      "reply": "The free tier includes **100 lookups per day** \u2014 no payment needed, no expiry.\n\nIf you're hitting the daily limit:\n- Wait until midnight UTC (counter resets automatically)\n- Upgrade to Pro ($10 deposit, 1,000 lookups/day) when available\n- Or email <support@blackswan-software.ai> if you need higher limits for a specific project\n\nClosing \u2014 reopen if you need higher limits for your use case."
     },
     {
       "name": "pricing-overview",
       "pattern": "(?i)(\\bpricing\\b|\\bcost\\b|how much|\\bprice\\b|free tier|verified tier|enterprise tier|tier.*structure|\\bsubscription\\b|monthly cost|annual cost|how do you bill|billing model|is.*(?:cygnus|cyg).*free|what.*get.*free|any.*charges?)",
       "label": "question/pricing",
       "close": true,
-      "reply": "Cygnus has a **permanent free tier** \u2014 no card required, no payment, no expiry.\n\n**What you get free:**\n- Verification grades for any library in our corpus (1,600+ verified)\n- CVE status sourced from OSV.dev\n- SBOM export (CycloneDX)\n- 100 lookups per day\n- CLI + CI integration (GitHub Actions)\n\n**Pro tier** ($10 min deposit, pay-as-you-go): 5,000 lookups/day, verified tokens, pre-compiled artifacts, audit documents. Coming soon.\n\nSign up: <https://blackswan-software.ai/signup>\n\nClosing \u2014 reopen if you have questions about pricing."
+      "reply": "Cygnus has a **permanent free tier** \u2014 no card required, no payment, no expiry.\n\n**What you get free:**\n- Verification grades for any library in our corpus (1,600+ verified)\n- CVE status sourced from OSV.dev\n- SBOM export (CycloneDX)\n- 100 lookups per day\n- CLI + CI integration (GitHub Actions)\n\n**Pro tier** ($10 min deposit, pay-as-you-go): 1,000 lookups/day (first 100 free), audit documents ($0.25/lib), priority queue ($0.10/lib). Coming soon.\n\n**Enterprise** ($500/mo): 5,000 lookups/day included, dedicated machine, audit docs ($0.25/lib), priority queue included, priority email support.\n\nSign up: <https://blackswan-software.ai/signup>\n\nClosing \u2014 reopen if you have questions about pricing."
     },
     {
       "name": "what-is-cygnus-lock",
