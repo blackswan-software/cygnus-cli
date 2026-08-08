@@ -1403,15 +1403,23 @@ def cmd_init(args):
     if eco:
         (CYGNUS_HOME / eco).mkdir(exist_ok=True)
 
-    # Write config
-    config = {
+    # Write config — MERGE with existing to preserve auth fields (api_key,
+    # accounts, tos_accepted, etc.).  Bug 023J: overwriting dropped the API
+    # key and silently logged the user out.
+    existing = {}
+    if (CYGNUS_HOME / "config.json").exists():
+        try:
+            existing = json.loads((CYGNUS_HOME / "config.json").read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    existing.update({
         "registry": REGISTRY_URL,
         "platform": _PLATFORM,
         "home": str(CYGNUS_HOME),
         "ecosystem": eco,
         "initialized_at": __import__("datetime").datetime.now().isoformat(),
-    }
-    (CYGNUS_HOME / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    })
+    (CYGNUS_HOME / "config.json").write_text(json.dumps(existing, indent=2) + "\n")
 
     if eco == "python":
         venv = _find_venv()
@@ -2317,6 +2325,7 @@ def cmd_check(args):
     total_cves = 0
     vulnerable = []
     outdated = []
+    api_errors = []
 
     for lib in deps:
         lib_encoded = lib.replace("/", "__").replace(":", "__")
@@ -2333,10 +2342,13 @@ def cmd_check(args):
         if not version:
             continue
 
-        # Check provenance for CVEs
+        # Check provenance for CVEs — fail CLOSED on API errors
         provenance = _api(f"/provenance/{ecosystem}/{lib_encoded}/{version}")
-        advisories = provenance.get("advisories", []) if provenance else []
-        risk_flags = provenance.get("risk_flags", []) if provenance else []
+        if provenance is None:
+            api_errors.append(f"{lib}@{version}")
+            continue
+        advisories = provenance.get("advisories", [])
+        risk_flags = provenance.get("risk_flags", [])
 
         if advisories:
             total_cves += len(advisories)
@@ -2358,12 +2370,23 @@ def cmd_check(args):
                 if "advisory" not in flag.lower():
                     print(f"    Risk: {flag}")
             print()
-    else:
+    elif not api_errors:
         print(f"  ✓ No known CVEs across {len(deps)} dependencies\n")
 
+    if api_errors:
+        print(f"  ⚠ Could NOT verify {len(api_errors)} package{'s' if len(api_errors) != 1 else ''} (API error — do NOT treat as clean):", file=sys.stderr)
+        for e in api_errors:
+            print(f"    - {e}", file=sys.stderr)
+        print(f"\n  Re-run when quota resets or check https://deps.dev manually.", file=sys.stderr)
+
     # Check for updates
+    checked = len(deps) - len(api_errors)
     print(f"  CVE source: deps.dev (Google OSV)")
-    print(f"  Checked {len(deps)} packages. Run 'cyg verify' for full confidence grades.")
+    if api_errors:
+        print(f"  Checked {checked}/{len(deps)} packages ({len(api_errors)} failed). Run 'cyg verify' for full confidence grades.")
+        sys.exit(2)
+    else:
+        print(f"  Checked {len(deps)} packages. Run 'cyg verify' for full confidence grades.")
 
 
 def _stamp_tos_local():
@@ -3161,14 +3184,14 @@ def _check_artifact_signature(ecosystem: str, library: str, version: str) -> dic
         # Couldn't verify locally — try server
         sha = hashlib.sha256(artifact_data).hexdigest()
         server_result = _api(f"/verify/{sha}", use_cache=False)
-        if server_result and server_result.get("status") == "verified":
+        if server_result and server_result.get("verified"):
             return {
                 "verified": True,
                 "algorithm": "Ed25519 (server-verified)",
                 "signed_at": sig.get("signed_at", ""),
                 "artifact_sha256": sha,
             }
-        return {"verified": False, "error": "Cannot verify locally (install cryptography) or via server"}
+        return {"verified": None, "error": "Could not verify signature (cryptography not available, server could not confirm)"}
 
 
 def _verify_single(ecosystem: str, library: str, pin_version: str = None,
@@ -3240,8 +3263,10 @@ def _verify_single(ecosystem: str, library: str, pin_version: str = None,
                 print(f"  Artifact:    {sig_result.get('artifact_sha256', '')[:16]}... ({sig_result.get('artifact_size', 0) // 1024}KB)")
                 if sig_result.get("key_id"):
                     print(f"  Key:         {sig_result['key_id']}")
+            elif sig_result.get("verified") is False:
+                print(f"  Signature:   INVALID ✗ — {sig_result.get('error', 'signature mismatch')}")
             else:
-                print(f"  Signature:   FAILED ✗ — {sig_result.get('error', 'unknown')}")
+                print(f"  Signature:   UNVERIFIED ⚠ — {sig_result.get('error', 'could not check')}")
     else:
         print(f"  Signed:      not yet")
         if check_signature:
