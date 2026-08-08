@@ -2335,7 +2335,10 @@ def cmd_check(args):
             version = pinned
         else:
             ver_data = _api(f"/versions/{ecosystem}/{lib_encoded}/latest")
-            version = ver_data.get("version", "") if ver_data else ""
+            if ver_data is None:
+                api_errors.append(lib)
+                continue
+            version = ver_data.get("version", "")
             if library and version:
                 print(f"  ⚠ No pinned version found in lockfile — checking latest ({version})")
                 print(f"    To scan your actual dependency: cyg check {lib}=={version}\n")
@@ -4423,6 +4426,10 @@ def cmd_auth_status(args):
         limit = usage.get("daily_limit", "?")
         remaining = usage.get("remaining_today", "?")
         print(f"  Today: {daily} requests (limit: {limit}, remaining: {remaining})")
+        grace_used = usage.get("grace_used_today", 0)
+        grace_limit = usage.get("grace_limit", 3)
+        grace_remaining = max(0, grace_limit - grace_used)
+        print(f"  Grace credits: {grace_remaining} remaining today (of {grace_limit})")
         prio_used = usage.get("priority_used_this_month", 0)
         prio_limit = usage.get("priority_limit", "?")
         print(f"  Priority queue: {prio_used}/{prio_limit} used this month")
@@ -4675,8 +4682,8 @@ def cmd_account(args):
         # Free-period launch: don't promote deposit here. The CLI
         # command still works; this just doesn't tell free-tier users
         # to top up.
-        print(f"\n  You're on the free tier. Email support@blackswan-software.ai")
-        print(f"  with your account email if you need more than the daily quota + 3 grace credits.")
+        print(f"\n  You're on the free tier. Run `cyg status` for usage details.")
+        print(f"  Email support@blackswan-software.ai for help.")
 
 
 def cmd_auth_forgot_key(args):
