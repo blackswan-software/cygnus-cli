@@ -139,7 +139,8 @@ fi
 
 # ── 6. Done ─────────────────────────────────────────────────────────
 echo ""
-INSTALLED_VERSION=$("$INSTALL_DIR/cygnus" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+INSTALLED_VERSION=$("$INSTALL_DIR/cygnus" version 2>/dev/null | awk '{print $2}')
+INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
 info "Cygnus CLI v${INSTALLED_VERSION} installed!"
 echo ""
 printf "%b\n" "  ${CYAN}Get started:${NC}"

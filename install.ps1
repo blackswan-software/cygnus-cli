@@ -63,8 +63,10 @@ if ($CurrentPath -notlike "*$InstallDir*") {
 }
 
 # Done
+$InstalledVersion = try { & "$InstallDir\cygnus.exe" version 2>$null | ForEach-Object { ($_ -split ' ')[1] } } catch { "unknown" }
+if (-not $InstalledVersion) { $InstalledVersion = "unknown" }
 Write-Host ""
-Write-Host "  Cygnus CLI installed!" -ForegroundColor Green
+Write-Host "  Cygnus CLI v$InstalledVersion installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Get started:" -ForegroundColor Cyan
 Write-Host "    cygnus verify flask          # check a library"
