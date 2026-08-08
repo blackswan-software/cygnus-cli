@@ -2731,7 +2731,7 @@ def _check_balance():
     print(f"  Daily {tier}-tier quota exhausted ({remaining} requests remaining).")
     print(f"  Resets at:    {resets_at}")
     if tier == "free":
-        print(f"  Upgrade:      cyg deposit <USD> (unlocks higher limits)")
+        print(f"  Upgrade:      cyg status (see plan options)")
     print(f"  Need help?    support@blackswan-software.ai")
     sys.exit(1)
 
@@ -3834,6 +3834,59 @@ def _verify_project(ecosystem: str, deps: list[str], ci_mode: bool):
 def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
     """Print verify summary table and exit with appropriate code for CI."""
     fv = tp = ao = nc = 0
+
+    for lib in sorted(results.keys()):
+        r = results[lib]
+        conf = r.get("confidence") or "ATTESTATION_ONLY"
+        if conf == "FULLY_VERIFIED":
+            fv += 1
+        elif conf in ("VERIFIED_PARTIAL", "TESTS_PASS"):
+            tp += 1
+        elif conf == "ATTESTATION_ONLY":
+            ao += 1
+        else:
+            nc += 1
+
+    total_cves = sum(r.get("cve_count", 0) for r in results.values())
+    libs_with_cves = [lib for lib, r in results.items() if r.get("cve_count", 0) > 0]
+    total = len(results)
+
+    if ci_mode:
+        import json as _json
+        security_issues = [lib for lib, r in results.items()
+                          if r.get("confidence") == "SECURITY_ISSUE_DETECTED"]
+        cve_details = {lib: r.get("advisories", []) for lib, r in results.items()
+                       if r.get("cve_count", 0) > 0}
+        libraries = {}
+        for lib in sorted(results.keys()):
+            r = results[lib]
+            libraries[lib] = {
+                "version": r.get("version", ""),
+                "confidence": r.get("confidence") or "ATTESTATION_ONLY",
+                "grade": _confidence_grade(r.get("confidence") or "ATTESTATION_ONLY"),
+                "cve_count": r.get("cve_count", 0),
+            }
+            if r.get("advisories"):
+                libraries[lib]["advisories"] = r["advisories"]
+        ci_result = {
+            "libraries": libraries,
+            "summary": {
+                "total_deps": total,
+                "fully_verified": fv,
+                "partial": tp,
+                "attested": ao,
+                "unverified": nc,
+                "coverage_pct": round(fv / max(total, 1) * 100, 1),
+                "security_issues": security_issues,
+                "total_cves": total_cves,
+                "cve_packages": cve_details,
+            },
+        }
+        print(_json.dumps(ci_result))
+        if security_issues:
+            sys.exit(1)
+        return
+
     print(f"\n  {'Library':<35} {'Version':<12} {'Confidence':<20} Grade")
     print(f"  {'─' * 80}")
 
@@ -3846,20 +3899,6 @@ def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
         grade = _confidence_grade(conf)
         print(f"  {lib:<35} {ver:<12} {conf:<20} {grade}")
 
-        if conf == "FULLY_VERIFIED":
-            fv += 1
-        elif conf in ("VERIFIED_PARTIAL", "TESTS_PASS"):
-            tp += 1
-        elif conf == "ATTESTATION_ONLY":
-            ao += 1
-        else:
-            nc += 1
-
-    # CVE summary across all deps
-    total_cves = sum(r.get("cve_count", 0) for r in results.values())
-    libs_with_cves = [lib for lib, r in results.items() if r.get("cve_count", 0) > 0]
-
-    total = len(results)
     print(f"\n  Total: {total} deps — {fv} verified, {tp} partial, {ao} attested, {nc} unverified")
 
     if total_cves > 0:
@@ -3870,7 +3909,6 @@ def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
     else:
         print(f"  Security: no known CVEs")
 
-    # Badge: only count FULLY_VERIFIED
     if fv > 0:
         print(f"\n  cygnus-verified: {fv} libraries")
         badge_url = f"{REGISTRY_URL}/badge/project?fv={fv}&total={total}"
@@ -3885,7 +3923,6 @@ def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
     if nc > 0 and fv > 0:
         print(f"  {nc} deps not in corpus — queued for compilation")
 
-    # Audit deliverables per lib — SBOM and verify URLs
     verified_libs = [(lib, r) for lib, r in sorted(results.items())
                      if r.get("version") and r.get("confidence") not in
                      ("NOT_COMPILED", None)]
@@ -3897,31 +3934,6 @@ def _print_verify_summary(results: dict, ci_mode: bool, ecosystem: str = ""):
             print(f"    {lib}@{ver}")
             print(f"      SBOM:  {REGISTRY_URL}/sbom/{ecosystem}/{lib_enc}/{ver}")
             print(f"      Audit: {REGISTRY_URL}/verify/{ecosystem}/{lib_enc}/{ver}")
-
-    if ci_mode:
-        # CI mode: output JSON summary for dashboards. Never fail on coverage gaps.
-        # Only fail on security issues (SECURITY_ISSUE_DETECTED).
-        import json as _json
-        security_issues = [lib for lib, r in results.items()
-                          if r.get("confidence") == "SECURITY_ISSUE_DETECTED"]
-        cve_details = {lib: r.get("advisories", []) for lib, r in results.items()
-                       if r.get("cve_count", 0) > 0}
-        ci_result = {
-            "total_deps": total,
-            "fully_verified": fv,
-            "partial": tp,
-            "attested": ao,
-            "unverified": nc,
-            "coverage_pct": round(fv / max(total, 1) * 100, 1),
-            "security_issues": security_issues,
-            "total_cves": total_cves,
-            "cve_packages": cve_details,
-            "badge": f"cygnus-verified: {fv} libraries",
-        }
-        print(f"\n  CI summary: {_json.dumps(ci_result)}")
-        if security_issues:
-            print(f"  ⚠ SECURITY ISSUES: {', '.join(security_issues)}")
-            sys.exit(1)
 
 
 def _api_ext(path: str, use_cache: bool = True) -> dict | None:
