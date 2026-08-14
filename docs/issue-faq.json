@@ -67,6 +67,13 @@
       "reply": "Fastest path from install \u2192 first verification:\n\n```bash\n# From inside your project directory:\ncygnus verify\n```\n\nFirst run prompts for your email and creates an account automatically \u2014 no separate signup step needed.\n\nYou'll see per-library output like:\n\n```\n\u2713 flask@3.1.0 \u2014 FULLY_VERIFIED (47 functions verified)\n\u2713 requests@2.33.1 \u2014 FULLY_VERIFIED (176 functions verified)\n```\n\n**`cygnus verify` works alongside your existing package manager** \u2014 npm, pip, cargo, gem all still work normally. Cygnus adds a verification gate on top of whatever you already use.\n\nFor CI: see the `how do I use cygnus in CI?` question, or just add this to your GitHub Actions workflow:\n\n```yaml\n- uses: blackswan-software/cygnus-cli/.github/actions/verify@v0.1.2\n  with:\n    api-key: ${{ secrets.CYGNUS_API_KEY }}\n    ecosystem: python\n```\n\nThe free tier includes 100 lookups/day \u2014 no payment required, no expiry.\n\nClosing \u2014 reopen for specific questions about your setup."
     },
     {
+      "name": "check-without-signup",
+      "pattern": "(?i)(without.*sign.*up|no.*sign.*up.*(?:check|verify|look)|do I.*need.*(?:account|sign|register)|check.*library.*without|verify.*without.*(?:account|login|signup)|try.*before.*sign|try.*without.*(?:account|register)|can I.*(?:check|test|try).*(?:before|without)|browse.*without|no.*registration|no.*account.*(?:needed|required))",
+      "label": "question/quickstart",
+      "close": true,
+      "reply": "You can check any library without signing up.\n\n**On the website** — visit any library's verification page directly:\n\n```\nhttps://blackswan-software.ai/verify/python/requests/latest\nhttps://blackswan-software.ai/verify/node/lodash/latest\nhttps://blackswan-software.ai/verify/go/github.com/gin-gonic/gin/latest\n```\n\nNo login required. You'll see the grade, CVE status, and SBOM for that library.\n\n**Via CLI** — `cygnus verify <library>` will prompt you to create a free account on first run (email only, no credit card). After that, all lookups work at 100/day.\n\n**Via curl** — the public verify endpoint needs no auth:\n\n```bash\ncurl -s https://api.blackswan-software.ai/verify/python/requests/2.33.1\n```\n\nThe free tier is permanent — no card, no trial period, no expiry.\n\nClosing — reopen if you need higher-volume access without an account."
+    },
+    {
       "name": "add-more-tokens",
       "pattern": "(?i)(more tokens|add tokens|top.?up|recharge|add.*balance|add.*credit|out of tokens|ran out|usage limit|rate.?limit|deposit more|exceeded.*(?:daily )?limit|out of.*verif|need more.*(?:than|per)|increase.*quota)",
       "label": "question/billing",
