@@ -4629,7 +4629,7 @@ def cmd_auth_cancel(args):
 
 
 def cmd_account(args):
-    """Show user balance + recent charges (verified tier billing)."""
+    """Show user balance + recent charges (pro tier billing)."""
     env_key = os.environ.get("CYGNUS_API_KEY", "")
     cfg = _load_config()
     api_key = env_key or cfg.get("api_key", "")
