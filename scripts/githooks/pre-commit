@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# cygnus-cli pre-commit — tracked, activated via core.hooksPath.
+# This repo is PUBLIC (MIT). The guard is publication safety: secrets, .env,
+# and private infrastructure references must never land here.
+# Bypass: git commit --no-verify
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -z "$STAGED" ] && exit 0
+SCAN="$(echo "$STAGED" | grep -v '^scripts/githooks/' || true)"
+FAIL=0
+sect() { printf '\n\033[1m── %s ──\033[0m\n' "$1"; }
+
+sect "Secrets"
+SEC=$([ -n "$SCAN" ] && git diff --cached -U0 -- $SCAN 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' \
+  | grep -inE '(api_key|secret|token|password)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9/_+-]{16,}' \
+  | grep -viE '(\$\{|\$\(|os\.environ|getenv|env\.|example|placeholder|xxx|redacted|your-|<.*>)' || true)
+if [ -n "$SEC" ] || echo "$STAGED" | grep -qE '(^|/)\.env(\.|$)'; then
+  printf '\033[0;31m  BLOCKED — secret or .env staged.\033[0m\n'; [ -n "$SEC" ] && echo "$SEC" | head -3 | sed 's/^/    /'; FAIL=1
+else echo "  ok"; fi
+
+sect "Private references"
+PRIV=$([ -n "$SCAN" ] && git diff --cached -U0 -- $SCAN 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' \
+  | grep -inE 'cygnus-registry|10\.124\.16|24\.199\.119|/opt/blackswan|do_spaces_secret' || true)
+if [ -n "$PRIV" ]; then
+  printf '\033[0;31m  BLOCKED — private infrastructure reference:\033[0m\n'; echo "$PRIV" | head -4 | sed 's/^/    /'; FAIL=1
+else echo "  ok"; fi
+
+[ "$FAIL" -ne 0 ] && { printf '\n\033[0;31mCommit blocked — this repo is PUBLIC.\033[0m\n'; exit 1; }
+exit 0
